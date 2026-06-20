@@ -1,0 +1,29 @@
+# 내부 관리 파일 — 리포에 올리지 않음
+cluade.md
+CLAUDE.md
+docs/history_for_newsession.md
+
+# 시크릿
+.env
+
+# Python 환경
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# SpeechBrain 모델 캐시 (용량 크고 재다운로드 가능)
+pretrained_models/
+
+# 테스트 녹음 파일
+*.wav
+recordings/
+
+# macOS / VS Code
+.DS_Store
+.vscode/
+
+# 기타
+*.log

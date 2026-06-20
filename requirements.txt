@@ -1,0 +1,15 @@
+websockets>=12.0          # Realtime API WebSocket (async)
+openai>=1.30.0            # 보조 유틸/타입
+python-dotenv>=1.0.0      # .env 로드
+sounddevice>=0.4.6        # 마이크 PCM 캡처/재생 (PortAudio 필요)
+numpy>=1.26.0             # PCM 버퍼 처리
+speechbrain>=1.0.0        # ECAPA-TDNN 화자 임베딩
+torch>=2.2.0              # SpeechBrain 백엔드 (CPU 빌드)
+torchaudio>=2.2.0
+psycopg2-binary>=2.9.9    # PostgreSQL 드라이버
+pgvector>=0.2.4           # pgvector 파이썬 바인딩
+fastapi>=0.111.0          # 프론트엔드/로컬 서버
+uvicorn>=0.29.0           # FastAPI 실행
+pytest>=8.0.0             # 테스트
+pytest-asyncio>=0.23.0    # async 테스트
+httpx>=0.27.0             # FastAPI 테스트 클라이언트
