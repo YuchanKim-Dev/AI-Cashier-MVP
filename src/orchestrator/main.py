@@ -19,11 +19,17 @@
 
 import asyncio
 import os
+import ssl
 import time
 import threading
 
+import certifi
 import uvicorn
 from dotenv import load_dotenv
+
+# 맥 Python에서 SSL 인증서를 못 찾는 문제 해결
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
 
 from src.audio.capture import AsyncMicrophoneCapture
 from src.audio.playback import AudioPlayback

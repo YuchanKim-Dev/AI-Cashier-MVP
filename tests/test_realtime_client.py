@@ -37,18 +37,31 @@ class TestEventHandling:
         client.on_session_ready.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_audio_delta_calls_on_audio(self, client):
+    async def test_audio_delta_calls_on_audio_ga(self, client):
+        """GA 이벤트명 response.output_audio.delta"""
+        await client._handle_event({"type": "response.output_audio.delta", "delta": "base64data"})
+        client.on_audio_delta.assert_called_once_with("base64data")
+
+    @pytest.mark.asyncio
+    async def test_audio_delta_calls_on_audio_beta_compat(self, client):
+        """Beta 호환 이벤트명 response.audio.delta 도 동작해야 함"""
         await client._handle_event({"type": "response.audio.delta", "delta": "base64data"})
         client.on_audio_delta.assert_called_once_with("base64data")
 
     @pytest.mark.asyncio
     async def test_empty_audio_delta_not_called(self, client):
-        """델타가 빈 문자열이면 콜백을 호출하지 않는다."""
-        await client._handle_event({"type": "response.audio.delta", "delta": ""})
+        await client._handle_event({"type": "response.output_audio.delta", "delta": ""})
         client.on_audio_delta.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_text_delta_calls_on_text(self, client):
+    async def test_text_delta_calls_on_text_ga(self, client):
+        """GA 이벤트명 response.output_text.delta"""
+        await client._handle_event({"type": "response.output_text.delta", "delta": "안녕"})
+        client.on_text_delta.assert_called_once_with("안녕")
+
+    @pytest.mark.asyncio
+    async def test_text_delta_calls_on_text_beta_compat(self, client):
+        """Beta 호환 이벤트명도 동작해야 함"""
         await client._handle_event({"type": "response.audio_transcript.delta", "delta": "안녕"})
         client.on_text_delta.assert_called_once_with("안녕")
 
