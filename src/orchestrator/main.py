@@ -89,7 +89,11 @@ async def action_handler():
         action = await action_queue.get()
         atype = action.get("type")
 
-        if atype == "checkout":
+        if atype == "start":
+            # 시작하기 버튼 → 주문 화면으로 전환
+            _sync_and_push({"screen": "ordering"})
+
+        elif atype == "checkout":
             if cart.is_empty:
                 print("[Orchestrator] 장바구니가 비어있어 결제 불가")
                 continue

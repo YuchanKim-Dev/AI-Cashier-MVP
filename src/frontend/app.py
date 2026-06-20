@@ -152,6 +152,19 @@ async def action_add_menu(request: Request):
     return {"ok": True}
 
 
+@app.post("/action/start")
+async def action_start():
+    """시작하기 버튼 — 대기 화면 → 주문 화면."""
+    _enqueue_action({"type": "start"})
+    return {"ok": True}
+
+
+@app.get("/app", response_class=HTMLResponse)
+async def app_demo():
+    """앱 등록 가상 화면 — 별도 탭으로 열림."""
+    return HTMLResponse(content=_build_app_html())
+
+
 # ─── HTML ──────────────────────────────────────────────────────────────────────
 
 def _build_html() -> str:
@@ -487,7 +500,11 @@ def _build_html() -> str:
     <div class="screen active" id="screen-waiting">
       <div class="waiting-icon">🎤</div>
       <div class="waiting-title">안녕하세요!</div>
-      <div class="waiting-hint">말씀하시면 바로 주문을 도와드립니다</div>
+      <div class="waiting-hint">말씀하시거나 아래 버튼을 눌러 시작하세요</div>
+      <div style="display:flex;gap:12px;margin-top:32px;flex-wrap:wrap;justify-content:center;">
+        <button class="btn btn-primary" style="width:200px;" onclick="startOrder()">시작하기</button>
+        <button class="btn btn-outline" style="width:200px;" onclick="window.open('/app','_blank')">📱 앱 등록 미리보기</button>
+      </div>
     </div>
 
     <!-- 주문 화면 -->
@@ -749,6 +766,7 @@ async function post(url, data) {
   } catch(e) { console.error(e); }
 }
 
+function startOrder()            { post('/action/start', {}); }
 function checkout()              { post('/action/checkout', {}); }
 function selectPayment(method)   { post('/action/payment', {method}); }
 function saveVoice(save)         { post('/action/save_voice', {save}); }
@@ -773,6 +791,584 @@ es.onmessage = e => applyState(JSON.parse(e.data));
 
 // ── 초기 메뉴 렌더링 ──
 renderMenuGrid('버거');
+</script>
+</body>
+</html>"""
+
+
+def _build_app_html() -> str:
+    """앱 등록 가상 화면 — /app 에서 접근."""
+    return r"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Cashier 앱 — 등록</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #f8fafc;
+    --card: #ffffff;
+    --accent: #6366f1;
+    --accent2: #8b5cf6;
+    --green: #22c55e;
+    --red: #ef4444;
+    --text: #0f172a;
+    --muted: #64748b;
+    --border: #e2e8f0;
+    --radius: 20px;
+  }
+  body {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif;
+    padding: 24px;
+  }
+
+  /* 폰 프레임 */
+  .phone {
+    background: var(--card);
+    border-radius: 40px;
+    width: 390px;
+    min-height: 760px;
+    box-shadow: 0 40px 80px rgba(0,0,0,0.35);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
+  .phone-bar {
+    height: 50px;
+    background: var(--card);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    position: relative;
+  }
+  .phone-notch {
+    width: 120px; height: 28px;
+    background: #0f172a;
+    border-radius: 0 0 18px 18px;
+  }
+  .phone-time {
+    position: absolute;
+    left: 20px;
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: #0f172a;
+  }
+
+  /* 앱 헤더 */
+  .app-header {
+    padding: 20px 24px 12px;
+    background: var(--accent);
+    color: white;
+    flex-shrink: 0;
+  }
+  .app-logo { font-size: 1.3rem; font-weight: 800; letter-spacing: -0.5px; }
+  .app-tagline { font-size: 0.78rem; opacity: 0.85; margin-top: 2px; }
+
+  /* 스텝 인디케이터 */
+  .steps {
+    display: flex;
+    gap: 0;
+    background: var(--accent);
+    padding: 0 24px 16px;
+    flex-shrink: 0;
+  }
+  .step {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    cursor: pointer;
+    opacity: 0.5;
+    transition: opacity .2s;
+  }
+  .step.active { opacity: 1; }
+  .step-dot {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.3);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: white;
+    margin-bottom: 4px;
+  }
+  .step.active .step-dot { background: white; color: var(--accent); }
+  .step.done .step-dot { background: var(--green); }
+  .step-label { font-size: 0.6rem; color: white; text-align: center; opacity: 0.9; }
+  .step-line { flex: 1; height: 2px; background: rgba(255,255,255,0.3); margin-top: 14px; }
+  .step-line.done { background: var(--green); }
+
+  /* 스크롤 콘텐츠 */
+  .app-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+  }
+
+  /* 각 단계 패널 */
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  .panel-title { font-size: 1.3rem; font-weight: 800; color: var(--text); margin-bottom: 6px; }
+  .panel-sub   { font-size: 0.85rem; color: var(--muted); margin-bottom: 24px; line-height: 1.6; }
+
+  .input-group { margin-bottom: 16px; }
+  .input-label { font-size: 0.78rem; color: var(--muted); font-weight: 600; margin-bottom: 6px; display: block; }
+  .app-input {
+    width: 100%;
+    border: 1.5px solid var(--border);
+    border-radius: 12px;
+    padding: 13px 16px;
+    font-size: 0.95rem;
+    color: var(--text);
+    outline: none;
+    transition: border-color .2s;
+    background: var(--bg);
+  }
+  .app-input:focus { border-color: var(--accent); background: white; }
+
+  /* 목소리 등록 UI */
+  .voice-recorder {
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 32px 20px;
+    text-align: center;
+    margin-bottom: 16px;
+    transition: all .2s;
+  }
+  .voice-recorder.recording {
+    border-color: var(--red);
+    background: #fff5f5;
+    animation: pulse-border 1s infinite;
+  }
+  .voice-recorder.done {
+    border-color: var(--green);
+    background: #f0fdf4;
+  }
+  @keyframes pulse-border { 0%,100%{border-color:var(--red)} 50%{border-color:#fca5a5} }
+  .record-icon { font-size: 3rem; margin-bottom: 12px; }
+  .record-text { font-size: 0.9rem; color: var(--muted); margin-bottom: 16px; }
+  .record-bar {
+    height: 6px; border-radius: 3px;
+    background: var(--border);
+    overflow: hidden;
+    margin: 0 auto 12px;
+    width: 80%;
+  }
+  .record-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    width: 0%;
+    transition: width .1s;
+  }
+
+  /* 카드 등록 */
+  .card-preview {
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    border-radius: 16px;
+    padding: 24px;
+    color: white;
+    margin-bottom: 16px;
+    position: relative;
+    overflow: hidden;
+  }
+  .card-preview::before {
+    content: '';
+    position: absolute;
+    top: -30px; right: -30px;
+    width: 120px; height: 120px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.1);
+  }
+  .card-chip { font-size: 1.5rem; margin-bottom: 16px; }
+  .card-number { font-size: 1.1rem; letter-spacing: 3px; font-weight: 600; margin-bottom: 8px; }
+  .card-name { font-size: 0.78rem; opacity: 0.8; }
+
+  /* 취향 태그 */
+  .taste-tags { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .taste-tag {
+    padding: 8px 16px;
+    border-radius: 999px;
+    border: 1.5px solid var(--border);
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: all .15s;
+    color: var(--muted);
+  }
+  .taste-tag.selected { background: var(--accent); border-color: var(--accent); color: white; }
+
+  /* 완료 화면 */
+  .complete-wrap { text-align: center; padding: 20px 0; }
+  .complete-check { font-size: 4rem; margin-bottom: 16px; }
+  .complete-name  { font-size: 1.4rem; font-weight: 800; color: var(--text); margin-bottom: 8px; }
+  .complete-desc  { font-size: 0.88rem; color: var(--muted); line-height: 1.7; margin-bottom: 24px; }
+  .badge {
+    display: inline-block;
+    background: #f0f4ff;
+    color: var(--accent);
+    border-radius: 999px;
+    padding: 6px 16px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin: 4px;
+  }
+
+  /* 버튼 */
+  .btn-app {
+    width: 100%;
+    padding: 15px;
+    border-radius: 14px;
+    border: none;
+    font-size: 1rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all .15s;
+    margin-top: 8px;
+  }
+  .btn-app:hover { opacity: 0.88; transform: translateY(-1px); }
+  .btn-primary-app { background: var(--accent); color: white; }
+  .btn-outline-app { background: transparent; color: var(--accent); border: 1.5px solid var(--accent); }
+
+  /* 하단 네비게이션 */
+  .app-nav {
+    display: flex;
+    border-top: 1px solid var(--border);
+    background: var(--card);
+    flex-shrink: 0;
+  }
+  .nav-item {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 10px;
+    font-size: 0.65rem;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .nav-item.active { color: var(--accent); }
+  .nav-icon { font-size: 1.2rem; margin-bottom: 2px; }
+
+  .divider { height: 1px; background: var(--border); margin: 16px 0; }
+  .info-box {
+    background: #f0f4ff;
+    border-radius: 12px;
+    padding: 14px;
+    font-size: 0.82rem;
+    color: var(--accent);
+    margin-bottom: 16px;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+<div class="phone">
+  <!-- 상단 노치 -->
+  <div class="phone-bar">
+    <div class="phone-time">9:41</div>
+    <div class="phone-notch"></div>
+  </div>
+
+  <!-- 앱 헤더 -->
+  <div class="app-header">
+    <div class="app-logo">AI Cashier</div>
+    <div class="app-tagline">목소리로 주문하는 스마트 캐셔</div>
+  </div>
+
+  <!-- 스텝 인디케이터 -->
+  <div class="steps" id="steps">
+    <div class="step active" id="step-0" onclick="goStep(0)">
+      <div class="step-dot">1</div>
+      <div class="step-label">본인 확인</div>
+    </div>
+    <div class="step-line" id="line-0"></div>
+    <div class="step" id="step-1" onclick="goStep(1)">
+      <div class="step-dot">2</div>
+      <div class="step-label">목소리 등록</div>
+    </div>
+    <div class="step-line" id="line-1"></div>
+    <div class="step" id="step-2" onclick="goStep(2)">
+      <div class="step-dot">2</div>
+      <div class="step-label">카드 등록</div>
+    </div>
+    <div class="step-line" id="line-2"></div>
+    <div class="step" id="step-3" onclick="goStep(3)">
+      <div class="step-dot">3</div>
+      <div class="step-label">취향 설정</div>
+    </div>
+    <div class="step-line" id="line-3"></div>
+    <div class="step" id="step-4" onclick="goStep(4)">
+      <div class="step-dot">✓</div>
+      <div class="step-label">완료</div>
+    </div>
+  </div>
+
+  <!-- 콘텐츠 -->
+  <div class="app-content">
+
+    <!-- Step 0: 본인 확인 -->
+    <div class="panel active" id="panel-0">
+      <div class="panel-title">안녕하세요!</div>
+      <div class="panel-sub">이름과 전화번호로 간단히 등록하세요.<br>키오스크 방문 기록이 있으면 자동으로 연결됩니다.</div>
+      <div class="input-group">
+        <label class="input-label">이름</label>
+        <input class="app-input" id="app-name" type="text" placeholder="홍길동" value="">
+      </div>
+      <div class="input-group">
+        <label class="input-label">전화번호</label>
+        <input class="app-input" id="app-phone" type="tel" placeholder="01012345678" value="">
+      </div>
+      <div class="info-box" id="kiosk-link-box" style="display:none">
+        🔗 키오스크 방문 기록을 찾았어요!<br>
+        <strong id="kiosk-found-text"></strong> — 연결하고 목소리를 다시 등록하면 더 정확해집니다.
+      </div>
+      <button class="btn-app btn-primary-app" onclick="step0Next()">다음</button>
+    </div>
+
+    <!-- Step 1: 목소리 등록 -->
+    <div class="panel" id="panel-1">
+      <div class="panel-title">목소리 등록</div>
+      <div class="panel-sub">조용한 환경에서 아래 문장을 읽어주세요.<br>키오스크에서보다 훨씬 정확하게 등록됩니다.</div>
+      <div class="voice-recorder" id="voice-recorder">
+        <div class="record-icon" id="rec-icon">🎤</div>
+        <div class="record-text" id="rec-text">버튼을 눌러 녹음을 시작하세요</div>
+        <div style="background:#f0f4ff;border-radius:12px;padding:14px;margin-bottom:16px;font-size:0.9rem;color:#334155;line-height:1.7;font-style:italic;">
+          "안녕하세요, 저는 AI 캐셔를 이용하고 싶어요.<br>치즈버거 하나랑 콜라 주세요!"
+        </div>
+        <div class="record-bar"><div class="record-fill" id="rec-fill"></div></div>
+        <button class="btn-app btn-primary-app" id="rec-btn" onclick="toggleRecord()">녹음 시작</button>
+      </div>
+      <div id="rec-status" style="display:none;text-align:center;color:var(--green);font-weight:600;margin-bottom:12px;">
+        ✅ 녹음 완료! (5.2초)
+      </div>
+      <button class="btn-app btn-primary-app" id="voice-next-btn" onclick="goStep(2)" style="display:none">다음</button>
+      <button class="btn-app btn-outline-app" onclick="goStep(2)" style="margin-top:8px">건너뛰기 (나중에)</button>
+    </div>
+
+    <!-- Step 2: 카드 등록 -->
+    <div class="panel" id="panel-2">
+      <div class="panel-title">카드 등록</div>
+      <div class="panel-sub">앱 카드를 등록하면 키오스크에서<br>목소리만으로 결제할 수 있어요.</div>
+      <div class="card-preview" id="card-preview">
+        <div class="card-chip">▣</div>
+        <div class="card-number" id="card-num-display">•••• •••• •••• ••••</div>
+        <div class="card-name" id="card-name-display">홍 길 동</div>
+      </div>
+      <div class="input-group">
+        <label class="input-label">카드 번호</label>
+        <input class="app-input" id="card-num" type="tel" placeholder="0000 0000 0000 0000"
+          oninput="formatCardNum(this)" maxlength="19">
+      </div>
+      <div style="display:flex;gap:10px;">
+        <div class="input-group" style="flex:1">
+          <label class="input-label">유효기간</label>
+          <input class="app-input" id="card-exp" type="tel" placeholder="MM/YY" maxlength="5"
+            oninput="formatExp(this)">
+        </div>
+        <div class="input-group" style="flex:1">
+          <label class="input-label">CVC</label>
+          <input class="app-input" id="card-cvc" type="tel" placeholder="•••" maxlength="3">
+        </div>
+      </div>
+      <button class="btn-app btn-primary-app" onclick="goStep(3)">카드 등록</button>
+      <button class="btn-app btn-outline-app" onclick="goStep(3)" style="margin-top:8px">건너뛰기 (나중에)</button>
+    </div>
+
+    <!-- Step 3: 취향 설정 -->
+    <div class="panel" id="panel-3">
+      <div class="panel-title">취향 설정</div>
+      <div class="panel-sub">AI가 맞춤 메뉴를 추천할 때 활용해요.<br>여러 개 선택 가능합니다.</div>
+      <div class="input-label" style="margin-bottom:10px">선호 카테고리</div>
+      <div class="taste-tags" id="taste-tags">
+        <div class="taste-tag" onclick="toggleTag(this)">🍔 버거</div>
+        <div class="taste-tag" onclick="toggleTag(this)">🍟 사이드</div>
+        <div class="taste-tag" onclick="toggleTag(this)">🥤 음료</div>
+        <div class="taste-tag" onclick="toggleTag(this)">🎁 세트</div>
+      </div>
+      <div class="divider"></div>
+      <div class="input-label" style="margin-bottom:10px">식이 제한</div>
+      <div class="taste-tags">
+        <div class="taste-tag" onclick="toggleTag(this)">🥗 채식</div>
+        <div class="taste-tag" onclick="toggleTag(this)">🌶 매운맛 좋아요</div>
+        <div class="taste-tag" onclick="toggleTag(this)">🧀 치즈 좋아요</div>
+        <div class="taste-tag" onclick="toggleTag(this)">🦐 해산물 좋아요</div>
+      </div>
+      <div class="divider"></div>
+      <div class="input-label" style="margin-bottom:10px">알림 설정</div>
+      <div class="taste-tags">
+        <div class="taste-tag selected" onclick="toggleTag(this)">🔔 주문 완료 알림</div>
+        <div class="taste-tag selected" onclick="toggleTag(this)">⭐ 신메뉴 알림</div>
+        <div class="taste-tag" onclick="toggleTag(this)">🎫 할인 쿠폰 알림</div>
+      </div>
+      <button class="btn-app btn-primary-app" style="margin-top:16px" onclick="goStep(4)">완료</button>
+    </div>
+
+    <!-- Step 4: 완료 -->
+    <div class="panel" id="panel-4">
+      <div class="complete-wrap">
+        <div class="complete-check">🎉</div>
+        <div class="complete-name" id="complete-name">홍길동님, 등록 완료!</div>
+        <div class="complete-desc">
+          이제 키오스크에서 말씀만 하시면<br>
+          바로 주문이 시작됩니다.<br><br>
+          등록된 기능:
+        </div>
+        <div>
+          <span class="badge">🎤 목소리 인식</span>
+          <span class="badge" id="badge-card">💳 앱 카드</span>
+          <span class="badge">⭐ 맞춤 추천</span>
+        </div>
+        <div class="divider"></div>
+        <div style="background:#f0fdf4;border-radius:12px;padding:16px;text-align:left;font-size:0.85rem;color:#166534;line-height:1.7;">
+          💡 <strong>다음 키오스크 방문 시</strong><br>
+          말씀하시면 자동으로 인식되어<br>
+          "어서오세요 홍길동님!"으로 맞이합니다.
+        </div>
+        <button class="btn-app btn-outline-app" style="margin-top:20px" onclick="window.close()">
+          키오스크 화면으로 돌아가기
+        </button>
+      </div>
+    </div>
+
+  </div><!-- /.app-content -->
+
+  <!-- 하단 네비 -->
+  <div class="app-nav">
+    <div class="nav-item active"><div class="nav-icon">🏠</div>홈</div>
+    <div class="nav-item"><div class="nav-icon">📋</div>주문내역</div>
+    <div class="nav-item"><div class="nav-icon">👤</div>내 정보</div>
+    <div class="nav-item"><div class="nav-icon">⚙️</div>설정</div>
+  </div>
+</div>
+
+<script>
+let currentStep = 0;
+let isRecording = false;
+let recInterval = null;
+let recProgress = 0;
+let userName = '';
+
+function goStep(n) {
+  // 뒤로 가기 막기 (완료 후)
+  if (currentStep === 4 && n < 4) return;
+
+  document.querySelectorAll('.panel').forEach((p,i) => p.classList.toggle('active', i === n));
+
+  // 스텝 인디케이터 업데이트
+  for (let i = 0; i <= 4; i++) {
+    const el = document.getElementById('step-' + i);
+    if (!el) continue;
+    el.classList.remove('active','done');
+    if (i < n) el.classList.add('done');
+    else if (i === n) el.classList.add('active');
+  }
+  for (let i = 0; i <= 3; i++) {
+    const line = document.getElementById('line-' + i);
+    if (line) line.classList.toggle('done', i < n);
+  }
+  currentStep = n;
+
+  // 완료 화면 이름 업데이트
+  if (n === 4) {
+    const name = document.getElementById('app-name').value || '고객';
+    document.getElementById('complete-name').textContent = name + '님, 등록 완료!';
+    const cardNum = document.getElementById('card-num').value;
+    if (!cardNum) document.getElementById('badge-card').style.display = 'none';
+  }
+}
+
+function step0Next() {
+  const name = document.getElementById('app-name').value.trim();
+  const phone = document.getElementById('app-phone').value.trim();
+  if (!name) { alert('이름을 입력해주세요.'); return; }
+  if (!/^01[0-9]{8,9}$/.test(phone)) { alert('전화번호를 올바르게 입력해주세요.'); return; }
+  userName = name;
+  // 키오스크 연동 시뮬레이션 — 010-1234-5678이면 기존 기록 있는 척
+  if (phone === '01012345678') {
+    document.getElementById('kiosk-link-box').style.display = 'block';
+    document.getElementById('kiosk-found-text').textContent = '키오스크 방문 1회 기록';
+  }
+  goStep(1);
+}
+
+// 목소리 녹음 시뮬레이션
+function toggleRecord() {
+  if (isRecording) {
+    stopRecord();
+  } else {
+    startRecord();
+  }
+}
+
+function startRecord() {
+  isRecording = true;
+  recProgress = 0;
+  const recorder = document.getElementById('voice-recorder');
+  const btn = document.getElementById('rec-btn');
+  const fill = document.getElementById('rec-fill');
+  const icon = document.getElementById('rec-icon');
+  const text = document.getElementById('rec-text');
+  recorder.classList.add('recording');
+  btn.textContent = '⏹ 녹음 중지';
+  icon.textContent = '🔴';
+  text.textContent = '녹음 중... 문장을 읽어주세요';
+  recInterval = setInterval(() => {
+    recProgress = Math.min(recProgress + 2, 100);
+    fill.style.width = recProgress + '%';
+    if (recProgress >= 100) stopRecord();
+  }, 100);
+}
+
+function stopRecord() {
+  isRecording = false;
+  clearInterval(recInterval);
+  const recorder = document.getElementById('voice-recorder');
+  const btn = document.getElementById('rec-btn');
+  const icon = document.getElementById('rec-icon');
+  const text = document.getElementById('rec-text');
+  const status = document.getElementById('rec-status');
+  const nextBtn = document.getElementById('voice-next-btn');
+  recorder.classList.remove('recording');
+  recorder.classList.add('done');
+  btn.textContent = '다시 녹음';
+  icon.textContent = '✅';
+  text.textContent = '목소리 등록 완료!';
+  status.style.display = 'block';
+  nextBtn.style.display = 'block';
+}
+
+// 카드 번호 포맷
+function formatCardNum(input) {
+  let v = input.value.replace(/\D/g,'').slice(0,16);
+  input.value = v.replace(/(.{4})/g,'$1 ').trim();
+  const display = v ? v.replace(/(.{4})/g,'$1 ').trim() : '•••• •••• •••• ••••';
+  document.getElementById('card-num-display').textContent = display;
+}
+function formatExp(input) {
+  let v = input.value.replace(/\D/g,'');
+  if (v.length >= 2) v = v.slice(0,2) + '/' + v.slice(2,4);
+  input.value = v;
+}
+
+// 취향 태그 토글
+function toggleTag(el) { el.classList.toggle('selected'); }
+
+// 카드 이름 연동
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('app-name').addEventListener('input', e => {
+    document.getElementById('card-name-display').textContent =
+      e.target.value ? e.target.value.split('').join(' ') : '홍 길 동';
+  });
+});
 </script>
 </body>
 </html>"""
