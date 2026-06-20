@@ -21,11 +21,10 @@ def client():
         api_key="test-key",
         on_audio_delta=MagicMock(),
         on_text_delta=MagicMock(),
-        on_function_call=MagicMock(),
+        on_function_call=AsyncMock(),   # on_function_call은 async
         on_session_ready=MagicMock(),
-        on_status_update=MagicMock(),
+        on_status_update=MagicMock(),   # (status, timestamp) 서명
     )
-    # WebSocket 연결은 모킹
     c._ws = AsyncMock()
     c._connected = True
     return c
@@ -56,23 +55,32 @@ class TestEventHandling:
     @pytest.mark.asyncio
     async def test_speech_started_status(self, client):
         await client._handle_event({"type": "input_audio_buffer.speech_started"})
-        client.on_status_update.assert_called_with("listening")
+        # on_status_update는 (status, timestamp) 두 인수로 호출된다
+        args = client.on_status_update.call_args[0]
+        assert args[0] == "listening"
 
     @pytest.mark.asyncio
     async def test_speech_stopped_status(self, client):
         await client._handle_event({"type": "input_audio_buffer.speech_stopped"})
-        client.on_status_update.assert_called_with("processing")
+        args = client.on_status_update.call_args[0]
+        assert args[0] == "processing"
 
     @pytest.mark.asyncio
     async def test_response_done_status(self, client):
         await client._handle_event({"type": "response.done"})
-        client.on_status_update.assert_called_with("idle")
+        args = client.on_status_update.call_args[0]
+        assert args[0] == "idle"
 
     @pytest.mark.asyncio
     async def test_function_call_done(self, client):
-        event = {"type": "response.function_call_arguments.done", "name": "add_to_cart"}
+        event = {
+            "type": "response.function_call_arguments.done",
+            "call_id": "call_1",
+            "name": "add_to_cart",
+            "arguments": '{"item_name":"치즈버거"}',
+        }
         await client._handle_event(event)
-        client.on_function_call.assert_called_once_with(event)
+        client.on_function_call.assert_called_once_with("call_1", "add_to_cart", '{"item_name":"치즈버거"}')
 
 
 class TestSendAudioChunk:
