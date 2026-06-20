@@ -28,7 +28,7 @@ REALTIME_URL = "wss://api.openai.com/v1/realtime"
 DEFAULT_MODEL = "gpt-realtime-2"
 
 # GA PCM 포맷 오브젝트 (string "pcm16" 아님)
-_FMT_INPUT  = {"type": "audio/pcm", "rate": 16000}   # 마이크: 16kHz
+_FMT_INPUT  = {"type": "audio/pcm", "rate": 24000}   # GA 최소 24kHz (마이크도 24kHz 캡처)
 _FMT_OUTPUT = {"type": "audio/pcm", "rate": 24000}   # 스피커: 24kHz
 
 
@@ -40,6 +40,7 @@ class RealtimeClient:
         voice: str = "alloy",
         on_audio_delta: Optional[Callable[[str], None]] = None,
         on_text_delta: Optional[Callable[[str], None]] = None,
+        on_user_text: Optional[Callable[[str], None]] = None,
         on_response_done: Optional[Callable[[], None]] = None,
         on_function_call: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
         on_session_ready: Optional[Callable[[], None]] = None,
@@ -50,12 +51,14 @@ class RealtimeClient:
         self.voice = voice
         self.on_audio_delta = on_audio_delta
         self.on_text_delta = on_text_delta
+        self.on_user_text = on_user_text
         self.on_response_done = on_response_done
         self.on_function_call = on_function_call   # async (call_id, name, args_json)
         self.on_session_ready = on_session_ready
         self.on_status_update = on_status_update   # (status, timestamp)
         self._ws = None
         self._connected = False
+        self._queued_fn_outputs: list[tuple[str, str]] = []   # (call_id, output_json)
 
     async def connect(self):
         url = f"{REALTIME_URL}?model={self.model}"
@@ -84,7 +87,7 @@ class RealtimeClient:
             "session": {
                 "type": "realtime",
                 "instructions": system_prompt,
-                "output_modalities": ["audio", "text"],
+                "output_modalities": ["text"],
                 "audio": {
                     "input": {
                         "format": _FMT_INPUT,
@@ -94,6 +97,7 @@ class RealtimeClient:
                             "prefix_padding_ms": 300,
                             "silence_duration_ms": 600,
                         },
+                        "transcription": {"model": "whisper-1"},
                     },
                     "output": {
                         "format": _FMT_OUTPUT,
@@ -114,7 +118,7 @@ class RealtimeClient:
         await self._send({"type": "input_audio_buffer.append", "audio": b64})
 
     async def send_function_result(self, call_id: str, output: str):
-        """function call 결과 전송 → 다음 응답 유도."""
+        """function call 결과를 큐에 저장. response.create는 response.done 후 한번만 보낸다."""
         await self._send({
             "type": "conversation.item.create",
             "item": {
@@ -123,7 +127,7 @@ class RealtimeClient:
                 "output": output,
             },
         })
-        await self._send({"type": "response.create"})
+        self._queued_fn_outputs.append(call_id)
 
     async def _send(self, event: dict):
         if self._ws:
@@ -168,10 +172,15 @@ class RealtimeClient:
 
         # ── 응답 완료
         elif t == "response.done":
-            if self.on_response_done:
-                self.on_response_done()
-            if self.on_status_update:
-                self.on_status_update("idle", time.time())
+            if self._queued_fn_outputs:
+                # function call 결과들이 쌓여 있으면 → 한번만 response.create
+                self._queued_fn_outputs.clear()
+                await self._send({"type": "response.create"})
+            else:
+                if self.on_response_done:
+                    self.on_response_done()
+                if self.on_status_update:
+                    self.on_status_update("idle", time.time())
 
         # ── 발화 감지 (VAD)
         elif t == "input_audio_buffer.speech_started":
@@ -181,6 +190,12 @@ class RealtimeClient:
         elif t == "input_audio_buffer.speech_stopped":
             if self.on_status_update:
                 self.on_status_update("processing", time.time())
+
+        # ── 사용자 발화 전사 완료
+        elif t == "conversation.item.input_audio_transcription.completed":
+            transcript = event.get("transcript", "").strip()
+            if transcript and self.on_user_text:
+                self.on_user_text(transcript)
 
         # ── 오디오 출력 완료 (GA/Beta 호환)
         elif t in ("response.output_audio.done", "response.audio.done"):

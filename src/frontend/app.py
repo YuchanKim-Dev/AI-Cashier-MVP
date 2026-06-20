@@ -30,6 +30,8 @@ _state: dict = {
     "conversation": "idle",
     "mic": "active",
     "ai_text": "",
+    "user_text": "",
+    "conversation_log": [],
     "user_name": None,
     "is_new_user": True,
     "speaker_verified": None,
@@ -159,6 +161,21 @@ async def action_start():
     return {"ok": True}
 
 
+@app.post("/action/reset")
+async def action_reset():
+    """처음으로 — 세션 전체 초기화."""
+    _enqueue_action({"type": "reset"})
+    return {"ok": True}
+
+
+@app.post("/action/app_payment_confirm")
+async def action_app_payment_confirm(request: Request):
+    """앱카드 결제수단 선택 후 결제 실행."""
+    body = await request.json()
+    _enqueue_action({"type": "app_payment_confirm", "method": body.get("method", "신용카드")})
+    return {"ok": True}
+
+
 @app.get("/app", response_class=HTMLResponse)
 async def app_demo():
     """앱 등록 가상 화면 — 별도 탭으로 열림."""
@@ -178,17 +195,17 @@ def _build_html() -> str:
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
-    --bg: #0f172a;
-    --bg2: #1e293b;
-    --bg3: #334155;
-    --accent: #6366f1;
-    --accent2: #8b5cf6;
-    --green: #22c55e;
-    --yellow: #f59e0b;
-    --red: #ef4444;
-    --blue: #3b82f6;
-    --text: #f1f5f9;
-    --muted: #94a3b8;
+    --bg:    #f7f3ee;   /* 따뜻한 크림 */
+    --bg2:   #ffffff;   /* 흰 카드 */
+    --bg3:   #e8ddd3;   /* 따뜻한 경계선 */
+    --accent:  #d4531a; /* 매장 오렌지-레드 */
+    --accent2: #f59e0b; /* 앰버 */
+    --green: #16a34a;
+    --yellow: #d97706;
+    --red:   #dc2626;
+    --blue:  #2563eb;
+    --text:  #1c1917;   /* 따뜻한 거의-검정 */
+    --muted: #78716c;   /* 따뜻한 회색 */
     --radius: 16px;
   }
 
@@ -207,14 +224,15 @@ def _build_html() -> str:
     align-items: center;
     gap: 16px;
     padding: 12px 24px;
-    background: var(--bg2);
-    border-bottom: 1px solid var(--bg3);
+    background: var(--accent);   /* 포인트 오렌지-레드 헤더 */
+    border-bottom: none;
     flex-shrink: 0;
+    box-shadow: 0 2px 8px rgba(212,83,26,.25);
   }
   #statusbar .logo {
-    font-size: 1.1rem;
+    font-size: 1.15rem;
     font-weight: 800;
-    color: var(--accent);
+    color: #fff;
     margin-right: auto;
     letter-spacing: -0.5px;
   }
@@ -222,26 +240,26 @@ def _build_html() -> str:
     display: flex;
     align-items: center;
     gap: 6px;
-    background: var(--bg);
-    border: 1px solid var(--bg3);
+    background: rgba(255,255,255,.18);
+    border: 1px solid rgba(255,255,255,.35);
     border-radius: 999px;
     padding: 5px 12px;
     font-size: 0.78rem;
-    color: var(--muted);
+    color: #fff;
   }
   .dot {
     width: 8px; height: 8px;
     border-radius: 50%;
     flex-shrink: 0;
   }
-  .dot-active    { background: var(--green);  box-shadow: 0 0 6px var(--green); }
-  .dot-listening { background: var(--blue);   box-shadow: 0 0 6px var(--blue);  animation: blink 1s infinite; }
-  .dot-processing{ background: var(--yellow); box-shadow: 0 0 6px var(--yellow);}
-  .dot-speaking  { background: var(--accent2);box-shadow: 0 0 6px var(--accent2); animation: blink .7s infinite; }
-  .dot-idle      { background: var(--bg3); }
-  .dot-ok        { background: var(--green);  box-shadow: 0 0 6px var(--green); }
-  .dot-fail      { background: var(--red);    box-shadow: 0 0 6px var(--red); }
-  .dot-pending   { background: var(--bg3); }
+  .dot-active    { background: #86efac; }
+  .dot-listening { background: #93c5fd; animation: blink 1s infinite; }
+  .dot-processing{ background: #fde68a; }
+  .dot-speaking  { background: #fff;   animation: blink .7s infinite; }
+  .dot-idle      { background: rgba(255,255,255,.4); }
+  .dot-ok        { background: #86efac; }
+  .dot-fail      { background: #fca5a5; }
+  .dot-pending   { background: rgba(255,255,255,.3); }
 
   @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
 
@@ -292,7 +310,7 @@ def _build_html() -> str:
   }
   .cart-item-name { font-weight: 500; }
   .cart-item-qty  { color: var(--muted); font-size: 0.8rem; margin-top: 2px; }
-  .cart-item-price{ color: var(--accent); font-weight: 600; }
+  .cart-item-price{ color: var(--accent); font-weight: 700; }
   #cart-footer {
     padding: 16px 20px;
     border-top: 1px solid var(--bg3);
@@ -323,18 +341,116 @@ def _build_html() -> str:
   .waiting-hint  { color: var(--muted); font-size: 1rem; }
 
   /* 주문 화면 */
-  #screen-ordering { width: 100%; align-items: flex-start; justify-content: flex-start; }
-  #ai-speech-box {
+  #screen-ordering { width: 100%; align-items: flex-start; justify-content: flex-start; gap: 16px; }
+
+  /* ── 대화 패널 ── */
+  #conv-panel {
+    width: 100%;
     background: var(--bg2);
     border: 1px solid var(--bg3);
     border-radius: var(--radius);
-    padding: 20px 24px;
-    width: 100%;
-    margin-bottom: 20px;
-    min-height: 80px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    flex-shrink: 0;
   }
-  #ai-speech-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 8px; }
-  #ai-speech-text  { font-size: 1.15rem; line-height: 1.7; color: #a78bfa; min-height: 1.7em; }
+  #conv-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--bg3);
+    font-size: 0.8rem;
+    color: var(--muted);
+    background: var(--bg);
+  }
+  .conv-avatar {
+    width: 30px; height: 30px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1rem; flex-shrink: 0;
+  }
+  .conv-avatar.ai   { background: var(--accent); }
+  .conv-avatar.user { background: #92400e; }
+  #conv-header .ai-name { font-weight: 600; color: var(--accent); }
+
+  /* 메시지 목록 */
+  #chat-log {
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    max-height: 280px;
+    scroll-behavior: smooth;
+  }
+  .msg-row {
+    display: flex;
+    gap: 10px;
+    align-items: flex-end;
+  }
+  .msg-row.user { flex-direction: row-reverse; }
+
+  .msg-av {
+    width: 34px; height: 34px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.1rem; flex-shrink: 0; align-self: flex-start;
+  }
+  .msg-av.ai   { background: var(--accent); }
+  .msg-av.user { background: #92400e; }
+
+  .msg-body { display: flex; flex-direction: column; max-width: 76%; }
+  .msg-row.user .msg-body { align-items: flex-end; }
+  .msg-name { font-size: 0.68rem; color: var(--muted); margin-bottom: 4px; }
+  .msg-bubble {
+    padding: 11px 15px;
+    border-radius: 18px;
+    font-size: 0.95rem;
+    line-height: 1.6;
+    word-break: break-word;
+  }
+  .msg-bubble.ai   { background: #fff3ee; color: #7c2d12; border-bottom-left-radius: 4px; border-left: 3px solid var(--accent); }
+  .msg-bubble.user { background: #fef3c7; color: #78350f; border-bottom-right-radius: 4px; border-right: 3px solid var(--accent2); }
+
+  /* 하단 입력/스트리밍 영역 */
+  #conv-footer {
+    border-top: 1px solid var(--bg3);
+    padding: 12px 16px;
+    min-height: 56px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  #conv-status-icon {
+    width: 32px; height: 32px; border-radius: 50%; background: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1rem; flex-shrink: 0;
+  }
+  #conv-stream-text {
+    flex: 1; font-size: 0.95rem; color: var(--accent); line-height: 1.5;
+  }
+  /* 타이핑 점 */
+  .typing-dots { display: flex; gap: 5px; align-items: center; }
+  .typing-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--muted); animation: tdot 1.2s infinite;
+  }
+  .typing-dot:nth-child(2) { animation-delay: .2s; }
+  .typing-dot:nth-child(3) { animation-delay: .4s; }
+  @keyframes tdot { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-7px)} }
+  /* 마이크 파동 */
+  .mic-wave {
+    display: flex; align-items: center; gap: 3px;
+  }
+  .mic-bar {
+    width: 3px; background: var(--blue); border-radius: 2px;
+    animation: mbar 0.8s infinite ease-in-out;
+  }
+  .mic-bar:nth-child(1){height:8px;  animation-delay:0s}
+  .mic-bar:nth-child(2){height:16px; animation-delay:.15s}
+  .mic-bar:nth-child(3){height:10px; animation-delay:.3s}
+  .mic-bar:nth-child(4){height:20px; animation-delay:.45s}
+  .mic-bar:nth-child(5){height:12px; animation-delay:.6s}
+  @keyframes mbar { 0%,100%{transform:scaleY(0.4)} 50%{transform:scaleY(1)} }
 
   /* 메뉴 그리드 */
   #menu-section { width: 100%; }
@@ -368,34 +484,68 @@ def _build_html() -> str:
   .menu-card-price { color: var(--accent); font-size: 0.85rem; }
 
   /* 결제 화면 */
-  #screen-checkout { text-align: center; max-width: 480px; margin: 0 auto; width: 100%; }
-  .checkout-title { font-size: 1.6rem; font-weight: 800; margin-bottom: 24px; }
+  #screen-checkout { width: 100%; align-items: flex-start; justify-content: flex-start; flex-direction: row !important; gap: 24px; }
+  #checkout-left {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    background: var(--bg2);
+    border: 1px solid var(--bg3);
+    border-radius: var(--radius);
+    overflow: hidden;
+    min-width: 0;
+  }
+  #checkout-left-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--bg3);
+    font-size: 0.78rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    background: var(--bg);
+  }
+  #checkout-convo {
+    overflow-y: auto;
+    max-height: 420px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    scroll-behavior: smooth;
+  }
+  #checkout-right {
+    width: 300px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .checkout-title { font-size: 1.4rem; font-weight: 800; }
   #checkout-summary {
     background: var(--bg2);
     border: 1px solid var(--bg3);
     border-radius: var(--radius);
-    padding: 20px;
-    width: 100%;
-    margin-bottom: 24px;
+    padding: 18px;
     text-align: left;
   }
   .summary-item {
     display: flex;
     justify-content: space-between;
     padding: 8px 0;
-    font-size: 0.95rem;
+    font-size: 0.9rem;
     border-bottom: 1px solid var(--bg3);
   }
   .summary-item:last-child { border: none; }
   .summary-total {
     display: flex;
     justify-content: space-between;
-    font-size: 1.2rem;
+    font-size: 1.1rem;
     font-weight: 700;
-    padding-top: 12px;
+    padding-top: 10px;
     margin-top: 4px;
   }
-  .pay-buttons { display: flex; gap: 12px; width: 100%; }
+  .pay-buttons { display: flex; flex-direction: column; gap: 10px; }
 
   /* 처리 중 화면 */
   #screen-payment_processing { text-align: center; }
@@ -460,6 +610,7 @@ def _build_html() -> str:
   .btn-danger   { background: var(--red);     color: #fff; }
   .btn-outline  { background: transparent; color: var(--text); border: 1px solid var(--bg3); }
   .btn-yellow   { background: var(--yellow);  color: #000; }
+  #screen-card_insert, #screen-app_payment { text-align: center; max-width: 420px; margin: 0 auto; }
 
   .section-title {
     font-size: 0.75rem;
@@ -489,6 +640,8 @@ def _build_html() -> str:
     <div class="dot dot-pending" id="spk-dot"></div>
     <span id="spk-text">화자인증</span>
   </div>
+  <button id="tts-btn" class="chip" style="cursor:pointer;background:rgba(255,255,255,.9);border:1px solid rgba(255,255,255,.5);color:var(--accent);font-size:.78rem;font-weight:600;" onclick="toggleTTS()">🔊 음성 ON</button>
+  <button class="chip" style="cursor:pointer;background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.4);color:#fff;font-size:.78rem;" onclick="resetKiosk()">↩ 처음으로</button>
 </div>
 
 <!-- 메인 -->
@@ -509,12 +662,23 @@ def _build_html() -> str:
 
     <!-- 주문 화면 -->
     <div class="screen" id="screen-ordering">
-      <div id="ai-speech-box">
-        <div id="ai-speech-label">AI 캐셔</div>
-        <div id="ai-speech-text">말씀하세요...</div>
+      <!-- 대화 패널 -->
+      <div id="conv-panel">
+        <div id="conv-header">
+          <div class="conv-avatar ai">🤖</div>
+          <span class="ai-name">AI 캐셔</span>
+          <span style="margin-left:auto;font-size:0.75rem;" id="conv-header-status">대기 중</span>
+        </div>
+        <div id="chat-log"></div>
+        <div id="conv-footer">
+          <div id="conv-status-icon">🤖</div>
+          <div id="conv-stream-text">
+            <span style="color:var(--muted);font-size:.88rem;">말씀하세요...</span>
+          </div>
+        </div>
       </div>
+      <!-- 메뉴 -->
       <div id="menu-section">
-        <div class="section-title">메뉴</div>
         <div class="menu-tabs">
           <div class="menu-tab active" onclick="showCategory('버거')">버거</div>
           <div class="menu-tab" onclick="showCategory('사이드')">사이드</div>
@@ -527,11 +691,19 @@ def _build_html() -> str:
 
     <!-- 결제 화면 -->
     <div class="screen" id="screen-checkout">
-      <div class="checkout-title">주문 확인</div>
-      <div id="checkout-summary"></div>
-      <div class="pay-buttons">
-        <button class="btn btn-primary" onclick="selectPayment('app_card')">📱 앱 카드</button>
-        <button class="btn btn-outline" onclick="selectPayment('physical_card')">💳 현장 카드</button>
+      <!-- 왼쪽: 대화 내용 -->
+      <div id="checkout-left">
+        <div id="checkout-left-header">대화 내용</div>
+        <div id="checkout-convo"></div>
+      </div>
+      <!-- 오른쪽: 주문 내역 + 결제 -->
+      <div id="checkout-right">
+        <div class="checkout-title">주문 확인</div>
+        <div id="checkout-summary"></div>
+        <div class="pay-buttons">
+          <button class="btn btn-primary" onclick="selectPayment('app_card')">📱 앱 카드 결제</button>
+          <button class="btn btn-outline" onclick="selectPayment('physical_card')">💳 현장 카드 결제</button>
+        </div>
       </div>
     </div>
 
@@ -567,6 +739,33 @@ def _build_html() -> str:
       </div>
       <div id="reg-error" style="color:var(--red);font-size:.85rem;margin-bottom:12px;display:none;width:100%;"></div>
       <button class="btn btn-primary" onclick="submitRegister()" style="max-width:320px;">등록 완료</button>
+    </div>
+
+    <!-- 카드 삽입 대기 -->
+    <div class="screen" id="screen-card_insert">
+      <div style="font-size:4rem;margin-bottom:20px;animation:float 2s ease-in-out infinite">💳</div>
+      <div class="big-title">카드를 꽂아주세요</div>
+      <div class="sub-text">단말기에 카드를 삽입하면 자동으로 결제됩니다.<br><span style="color:var(--muted);font-size:.85rem">잠시 후 자동 결제됩니다...</span></div>
+      <div class="spinner" style="margin-top:12px"></div>
+    </div>
+
+    <!-- 앱카드 결제수단 선택 -->
+    <div class="screen" id="screen-app_payment">
+      <div style="font-size:3rem;margin-bottom:16px">📱</div>
+      <div class="big-title" style="margin-bottom:8px">결제 수단 선택</div>
+      <div class="sub-text">앱에 등록된 결제 수단을 선택하세요</div>
+      <div style="display:flex;flex-direction:column;gap:12px;width:100%;max-width:360px">
+        <button class="btn btn-primary" onclick="confirmAppPayment('신용카드')">
+          💳 신용카드
+        </button>
+        <button class="btn btn-outline" onclick="confirmAppPayment('체크카드')">
+          🏦 체크카드
+        </button>
+        <button class="btn btn-outline" onclick="confirmAppPayment('계좌이체')">
+          📤 계좌이체
+        </button>
+      </div>
+      <button class="btn btn-outline" style="max-width:200px;margin-top:20px;font-size:.85rem;padding:10px" onclick="post('/action/checkout',{})">← 결제수단 변경</button>
     </div>
 
     <!-- 주문 완료 -->
@@ -634,65 +833,135 @@ const MENU = {
 };
 
 let currentCategory = "버거";
-let currentState = {};
+let currentState    = {};
+let ttsEnabled      = true;
+let _lastLogLen     = 0;
+let _lastAiCount    = 0;
+
+// ── TTS ──
+function toggleTTS() {
+  ttsEnabled = !ttsEnabled;
+  const btn = document.getElementById('tts-btn');
+  btn.textContent = ttsEnabled ? '🔊 음성 ON' : '🔇 음성 OFF';
+  btn.style.background = ttsEnabled ? 'rgba(255,255,255,.9)' : 'rgba(255,255,255,.2)';
+  btn.style.color = ttsEnabled ? 'var(--accent)' : '#fff';
+  if (!ttsEnabled) window.speechSynthesis && window.speechSynthesis.cancel();
+}
+
+function speakKo(text) {
+  if (!ttsEnabled || !text || !window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const utt = new SpeechSynthesisUtterance(text);
+  utt.lang  = 'ko-KR';
+  utt.rate  = 1.05;
+  utt.pitch = 1.0;
+  // 한국어 voice 우선 선택
+  const voices = speechSynthesis.getVoices();
+  const koVoice = voices.find(v => v.lang.startsWith('ko'));
+  if (koVoice) utt.voice = koVoice;
+  speechSynthesis.speak(utt);
+}
 
 // ── 화면 전환 ──
 function showScreen(name) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   const el = document.getElementById('screen-' + name);
   if (el) el.classList.add('active');
-
-  // 장바구니 패널: 주문 중에만 표시
-  const cartPanel = document.getElementById('cart-panel');
-  cartPanel.classList.toggle('hidden', name !== 'ordering');
+  document.getElementById('cart-panel').classList.toggle('hidden', !['ordering','checkout','card_insert','app_payment'].includes(name));
 }
 
 // ── 상태 적용 ──
 function applyState(state) {
   currentState = state;
-
-  // 화면 전환
   showScreen(state.screen);
-
-  // 상태바
   updateStatusBar(state);
 
-  // AI 텍스트
-  if (state.ai_text !== undefined) {
-    document.getElementById('ai-speech-text').textContent = state.ai_text || '말씀하세요...';
-  }
+  if (state.conversation_log !== undefined) renderChatLog(state.conversation_log);
+  updateConvFooter(state);
 
-  // 장바구니
   renderCart(state.cart_items || [], state.cart_total || 0);
-
-  // 결제 화면 요약
-  if (state.screen === 'checkout') {
-    renderCheckoutSummary(state.cart_items || [], state.cart_total || 0);
-  }
-
-  // 완료 화면 메시지 커스텀
+  if (state.screen === 'checkout') renderCheckoutSummary(state.cart_items || [], state.cart_total || 0);
   if (state.screen === 'complete') {
-    const name = state.user_name;
-    document.getElementById('complete-title').textContent = name ? `감사합니다, ${name}님!` : '주문 완료!';
+    const nm = state.user_name;
+    document.getElementById('complete-title').textContent = nm ? `감사합니다, ${nm}님!` : '주문 완료!';
     document.getElementById('complete-sub').textContent =
-      state.transaction_id
-        ? `결제 완료 (${state.transaction_id})\n음식이 준비되면 안내드립니다.`
-        : '음식이 준비되면 안내드립니다.';
+      state.transaction_id ? `결제 완료 (${state.transaction_id})\n음식이 준비되면 안내드립니다.` : '음식이 준비되면 안내드립니다.';
   }
 }
 
+// ── 상태바 ──
 function updateStatusBar(state) {
-  const CONV_LABELS = {idle:'대기 중', listening:'듣는 중', processing:'처리 중', speaking:'말하는 중'};
-  const convDot  = document.getElementById('conv-dot');
-  const convText = document.getElementById('conv-text');
-  convDot.className  = 'dot dot-' + state.conversation;
-  convText.textContent = CONV_LABELS[state.conversation] || state.conversation;
+  const LABELS = {idle:'대기 중', listening:'듣는 중', processing:'처리 중', speaking:'말하는 중'};
+  const convDot = document.getElementById('conv-dot');
+  convDot.className = 'dot dot-' + state.conversation;
+  document.getElementById('conv-text').textContent = LABELS[state.conversation] || state.conversation;
 
-  const spkDot  = document.getElementById('spk-dot');
-  const spkText = document.getElementById('spk-text');
-  if (state.speaker_verified === true)  { spkDot.className='dot dot-ok';   spkText.textContent='인증됨'; }
-  else if (state.speaker_verified===false){ spkDot.className='dot dot-fail'; spkText.textContent='불일치'; }
-  else { spkDot.className='dot dot-pending'; spkText.textContent='화자인증'; }
+  const spkDot = document.getElementById('spk-dot');
+  if (state.speaker_verified === true)   { spkDot.className='dot dot-ok';   document.getElementById('spk-text').textContent='인증됨'; }
+  else if (state.speaker_verified===false){ spkDot.className='dot dot-fail'; document.getElementById('spk-text').textContent='불일치'; }
+  else { spkDot.className='dot dot-pending'; document.getElementById('spk-text').textContent='화자인증'; }
+}
+
+// ── 대화 하단 풋터 (스트리밍 / 상태 표시) ──
+function updateConvFooter(state) {
+  const icon   = document.getElementById('conv-status-icon');
+  const stream = document.getElementById('conv-stream-text');
+  const header = document.getElementById('conv-header-status');
+
+  if (state.ai_text) {
+    // AI 텍스트 스트리밍 중
+    icon.textContent = '🤖';
+    stream.innerHTML = `<span style="color:var(--accent)">${escHtml(state.ai_text)}<span style="display:inline-block;width:2px;height:1em;background:var(--accent);vertical-align:text-bottom;margin-left:2px;animation:blink .7s infinite"></span></span>`;
+    header && (header.textContent = 'AI 응답 중...');
+  } else if (state.conversation === 'listening') {
+    // 사용자 말하는 중
+    icon.textContent = '🎤';
+    stream.innerHTML = `<div class="mic-wave"><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div></div><span style="margin-left:8px;color:var(--blue)">듣는 중...</span>`;
+    header && (header.textContent = '손님 발화 중');
+  } else if (state.conversation === 'processing') {
+    icon.textContent = '🤖';
+    stream.innerHTML = `<div class="typing-dots"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div><span style="margin-left:8px;color:var(--muted)">생각 중...</span>`;
+    header && (header.textContent = '처리 중...');
+  } else {
+    icon.textContent = '🤖';
+    stream.innerHTML = `<span style="color:var(--muted);font-size:.88rem">말씀하세요...</span>`;
+    header && (header.textContent = '대기 중');
+  }
+}
+
+// ── 대화 로그 렌더링 ──
+function renderChatLog(log) {
+  // TTS: 새 AI 메시지가 추가되었을 때만 읽기
+  const aiMsgs = log.filter(m => m.role === 'ai');
+  if (aiMsgs.length > _lastAiCount) {
+    speakKo(aiMsgs[aiMsgs.length - 1].text);
+    _lastAiCount = aiMsgs.length;
+  }
+
+  if (log.length === _lastLogLen) return;
+  _lastLogLen = log.length;
+
+  const html = log.map(msg => {
+    const isAi = msg.role === 'ai';
+    return `
+      <div class="msg-row ${msg.role}">
+        <div class="msg-av ${msg.role}">${isAi ? '🤖' : '👤'}</div>
+        <div class="msg-body">
+          <div class="msg-name">${isAi ? 'AI 캐셔' : '손님'}</div>
+          <div class="msg-bubble ${msg.role}">${escHtml(msg.text)}</div>
+        </div>
+      </div>`;
+  }).join('');
+
+  // 주문 화면 + 결제 화면 둘 다 업데이트
+  const mainLog     = document.getElementById('chat-log');
+  const checkoutLog = document.getElementById('checkout-convo');
+  if (mainLog)     { mainLog.innerHTML     = html; mainLog.scrollTop     = mainLog.scrollHeight; }
+  if (checkoutLog) { checkoutLog.innerHTML = html; checkoutLog.scrollTop = checkoutLog.scrollHeight; }
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 // ── 장바구니 렌더링 ──
@@ -708,6 +977,7 @@ function renderCart(items, total) {
     <div class="cart-item">
       <div>
         <div class="cart-item-name">${item.name}</div>
+        ${item.includes ? `<div class="cart-item-qty" style="color:var(--accent);font-size:.75rem">${item.includes}</div>` : ''}
         <div class="cart-item-qty">× ${item.quantity}</div>
       </div>
       <div class="cart-item-price">${(item.price * item.quantity).toLocaleString()}원</div>
@@ -772,6 +1042,15 @@ function selectPayment(method)   { post('/action/payment', {method}); }
 function saveVoice(save)         { post('/action/save_voice', {save}); }
 function retryVerification()     { post('/action/retry_verification', {}); }
 
+function resetKiosk() {
+  if (!confirm('처음으로 돌아가시겠어요?\n주문 내용이 모두 초기화됩니다.')) return;
+  post('/action/reset', {});
+}
+
+function confirmAppPayment(method) {
+  post('/action/app_payment_confirm', {method});
+}
+
 function submitRegister() {
   const name  = document.getElementById('reg-name').value.trim();
   const phone = document.getElementById('reg-phone').value.trim();
@@ -788,6 +1067,12 @@ function submitRegister() {
 // ── SSE 연결 ──
 const es = new EventSource('/events');
 es.onmessage = e => applyState(JSON.parse(e.data));
+
+// TTS 음성 목록 로드 (일부 브라우저는 비동기)
+if (window.speechSynthesis) {
+  speechSynthesis.onvoiceschanged = () => speechSynthesis.getVoices();
+  speechSynthesis.getVoices();
+}
 
 // ── 초기 메뉴 렌더링 ──
 renderMenuGrid('버거');

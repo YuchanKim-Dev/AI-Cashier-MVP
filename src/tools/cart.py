@@ -33,6 +33,7 @@ class CartManager:
             "price": menu_item["price"],
             "quantity": quantity,
             "category": menu_item["category"],
+            "includes": menu_item.get("includes"),
         }
         self.items.append(new_item)
         return {"success": True, "action": "added", "item": new_item, "cart": self.to_dict()}

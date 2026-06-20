@@ -6,6 +6,9 @@ docs/history_for_newsession.md
 # 시크릿
 .env
 
+# 사용자 데이터 (개인정보)
+data/
+
 # Python 환경
 .venv/
 __pycache__/

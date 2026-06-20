@@ -20,7 +20,7 @@ import sounddevice as sd
 
 
 # Realtime API가 요구하는 포맷: 16kHz mono int16
-SAMPLE_RATE = 16000
+SAMPLE_RATE = 24000   # GA Realtime API 최소 요구치 24kHz (3단계 화자인증은 다운샘플링 예정)
 CHANNELS = 1
 DTYPE = "int16"
 # 한 청크당 프레임 수 — 100ms. 너무 작으면 오버헤드, 너무 크면 지연.

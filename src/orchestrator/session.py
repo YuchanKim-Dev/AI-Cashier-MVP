@@ -18,7 +18,9 @@ class SessionState:
     # 대화 상태
     conversation: str = "idle"       # idle|listening|processing|speaking
     mic: str = "active"
-    ai_text: str = ""                # AI 현재 발화 텍스트 (실시간 누적)
+    ai_text: str = ""                # AI 현재 발화 텍스트 (실시간 스트리밍)
+    user_text: str = ""              # 사용자 마지막 발화 전사
+    conversation_log: list = field(default_factory=list)  # [{role, text}] 전체 대화 이력
 
     # 사용자 정보
     user_name: Optional[str] = None  # 인식된/입력된 이름 (None = 신규)
@@ -45,6 +47,8 @@ class SessionState:
             "conversation": self.conversation,
             "mic": self.mic,
             "ai_text": self.ai_text,
+            "user_text": self.user_text,
+            "conversation_log": self.conversation_log,
             "user_name": self.user_name,
             "is_new_user": self.is_new_user,
             "speaker_verified": self.speaker_verified,

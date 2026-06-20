@@ -39,6 +39,7 @@ from src.realtime.client import RealtimeClient
 from src.tools.cart import CartManager
 from src.tools.handlers import FunctionCallHandler
 from src.tools.payment import payment_gateway
+from src.tools.user_store import save_user, get_first_user
 
 load_dotenv()
 
@@ -63,19 +64,13 @@ def start_frontend_server():
 
 
 # ─── 결제 처리 ─────────────────────────────────────────────────────────────────
-async def process_payment(method: str):
-    """결제 방법 선택 → mock 결제 처리 → 화면 전환."""
-    _sync_and_push({"screen": "payment_processing", "payment_method": method})
-    await asyncio.sleep(0.1)  # SSE 전송 시간 확보
-
-    result = await payment_gateway.process(
-        amount=cart.total,
-        method=method,
-    )
-
+async def _do_payment():
+    """실제 mock 결제 처리 → 결과 화면 전환."""
+    _sync_and_push({"screen": "payment_processing"})
+    await asyncio.sleep(0.1)
+    result = await payment_gateway.process(amount=cart.total, method=session.payment_method or "physical_card")
     if result["success"]:
         session.transaction_id = result["transaction_id"]
-        # 신규 사용자이고 목소리가 3초 이상 쌓였으면 저장 질문
         if session.is_new_user and session.enough_voice:
             _sync_and_push({"screen": "voice_save_prompt"})
         else:
@@ -85,58 +80,16 @@ async def process_payment(method: str):
         print(f"[Orchestrator] 결제 실패: {result.get('error')}")
 
 
-# ─── 버튼 액션 처리 루프 ───────────────────────────────────────────────────────
-async def action_handler():
-    """
-    frontend에서 버튼을 누르면 action_queue로 액션이 들어온다.
-    각 액션을 처리해 세션 상태를 업데이트한다.
-    """
-    while True:
-        action = await action_queue.get()
-        atype = action.get("type")
-
-        if atype == "start":
-            # 시작하기 버튼 → 주문 화면으로 전환
-            _sync_and_push({"screen": "ordering"})
-
-        elif atype == "checkout":
-            if cart.is_empty:
-                print("[Orchestrator] 장바구니가 비어있어 결제 불가")
-                continue
-            _sync_and_push({"screen": "checkout"})
-
-        elif atype == "payment":
-            await process_payment(action.get("method", "physical_card"))
-
-        elif atype == "save_voice":
-            if action.get("save"):
-                _sync_and_push({"screen": "register"})
-            else:
-                # 저장 거부 → 바로 완료 화면
-                _sync_and_push({"screen": "complete"})
-
-        elif atype == "register":
-            name  = action.get("name", "").strip()
-            phone = action.get("phone", "").strip()
-            if name and phone:
-                # 3단계에서 실제 DB 저장으로 교체. 지금은 세션에만 기록.
-                print(f"[Orchestrator] 등록 요청: {name} / {phone} (3단계에서 DB 저장)")
-                _sync_and_push({"user_name": name, "is_new_user": False, "screen": "complete"})
-
-        elif atype == "add_menu":
-            # 화면 메뉴 카드 클릭 → 장바구니 추가 (음성 없이)
-            result = cart.add_item(action.get("name", ""))
-            if result.get("success"):
-                _sync_and_push({
-                    "cart_items": result["cart"]["items"],
-                    "cart_total": result["cart"]["total"],
-                    "screen": "ordering",
-                })
-
-        elif atype == "retry_verification":
-            # 화자인증 재시도 — 잠금 해제 후 주문 화면 복귀
-            session.failed_verifications = 0
-            _sync_and_push({"screen": "ordering", "speaker_verified": None})
+async def process_payment(method: str):
+    """결제 처리. physical_card면 카드 삽입 대기 화면 먼저."""
+    _sync_and_push({"payment_method": method})
+    if method == "physical_card":
+        _sync_and_push({"screen": "card_insert"})
+        await asyncio.sleep(3)   # 카드 꽂는 mock 대기
+    elif method == "app_card":
+        _sync_and_push({"screen": "app_payment"})
+        return   # 실제 결제는 사용자가 결제수단 선택 후 별도 액션으로 처리
+    await _do_payment()
 
 
 # ─── 메인 비동기 파이프라인 ────────────────────────────────────────────────────
@@ -146,6 +99,9 @@ async def run():
         print("[Orchestrator] OPENAI_API_KEY가 없습니다. .env 파일을 확인하세요.")
         return
 
+    _pending_ai: str = ""    # user transcript 오기 전에 완성된 AI 텍스트
+    _pending_user: str = ""  # AI 응답 오기 전에 도착한 user transcript
+
     voice = os.getenv("OPENAI_REALTIME_VOICE", "alloy")
     model = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2")
     loop  = asyncio.get_event_loop()
@@ -153,9 +109,9 @@ async def run():
     # frontend 액션 큐 + 이벤트 루프 주입
     set_context(action_queue, loop)
 
-    # 재생 모듈
-    playback = AudioPlayback()
-    playback.start()
+    # 재생 모듈 — 텍스트 출력 모드에서는 브라우저 TTS 사용, 서버 재생 비활성
+    # playback = AudioPlayback()
+    # playback.start()
 
     # function call 핸들러 (checkout 시 결제 화면 전환 콜백)
     async def on_checkout_fn():
@@ -166,21 +122,53 @@ async def run():
     # ── Realtime 콜백들 ──
 
     def on_audio_delta(b64: str):
-        playback.play_base64(b64)
-        if session.screen != "locked":
-            session.conversation = "speaking"
-            push_state(session.to_dict())
+        pass  # 텍스트 모드에서 미사용 (브라우저 TTS가 재생)
 
     def on_text_delta(delta: str):
         session.ai_text += delta
         push_state(session.to_dict())
 
+    def on_user_text(text: str):
+        nonlocal _pending_ai, _pending_user
+        session.user_text = text
+        if _pending_ai:
+            # AI 응답이 이미 완성됐으면 순서대로 추가
+            session.conversation_log.append({"role": "user", "text": text})
+            session.conversation_log.append({"role": "ai",   "text": _pending_ai})
+            _pending_ai = ""
+        else:
+            # AI 응답 아직 안 옴 — 대기
+            _pending_user = text
+        push_state(session.to_dict())
+
     def on_response_done():
+        nonlocal _pending_ai, _pending_user
+        ai_text = session.ai_text.strip()
+        session.ai_text = ""
         session.conversation = "idle"
+        if ai_text:
+            if _pending_user:
+                # user transcript가 먼저 와있으면 순서대로 추가
+                session.conversation_log.append({"role": "user", "text": _pending_user})
+                session.conversation_log.append({"role": "ai",   "text": ai_text})
+                _pending_user = ""
+            else:
+                # user transcript 아직 안 옴 — 대기
+                _pending_ai = ai_text
         push_state(session.to_dict())
 
     def on_session_ready():
         print("[Orchestrator] Realtime 준비 완료. 말씀하세요!")
+        # 파일 DB에서 마지막 등록 사용자 로드 (Phase 2 mock 인식)
+        known_user = get_first_user()
+        greeting = "안녕하세요! 주문을 도와드릴게요. 무엇을 드시겠어요?"
+        if known_user:
+            session.user_name = known_user["name"]
+            session.is_new_user = False
+            session.speaker_verified = True
+            greeting = f"어서오세요, {known_user['name']}님! 오늘도 주문 도와드릴게요."
+            print(f"[Orchestrator] 등록 사용자 로드: {known_user['name']}")
+        session.conversation_log = [{"role": "ai", "text": greeting}]
         _sync_and_push({"mic": "active", "screen": "waiting"})
 
     def on_status_update(status: str, ts: float):
@@ -202,6 +190,67 @@ async def run():
         await client.send_function_result(call_id, result_json)
         push_state(session.to_dict())
 
+    # ── 버튼 액션 처리 루프 (run() 내부 — _pending_ai/_pending_user 접근) ──
+    async def action_handler():
+        nonlocal _pending_ai, _pending_user
+        while True:
+            action = await action_queue.get()
+            atype = action.get("type")
+
+            if atype == "reset":
+                _pending_ai = ""
+                _pending_user = ""
+                session.__init__()   # SessionState 초기화
+                cart.clear()
+                session.conversation_log = []
+                push_state(session.to_dict())
+
+            elif atype == "start":
+                # 시작하기 버튼 → 주문 화면으로 전환
+                _sync_and_push({"screen": "ordering"})
+
+            elif atype == "checkout":
+                if cart.is_empty:
+                    print("[Orchestrator] 장바구니가 비어있어 결제 불가")
+                    continue
+                _sync_and_push({"screen": "checkout"})
+
+            elif atype == "payment":
+                await process_payment(action.get("method", "physical_card"))
+
+            elif atype == "app_payment_confirm":
+                await _do_payment()
+
+            elif atype == "save_voice":
+                if action.get("save"):
+                    _sync_and_push({"screen": "register"})
+                else:
+                    # 저장 거부 → 바로 완료 화면
+                    _sync_and_push({"screen": "complete"})
+
+            elif atype == "register":
+                name  = action.get("name", "").strip()
+                phone = action.get("phone", "").strip()
+                if name and phone:
+                    save_user(name, phone)   # JSON 파일에 영구 저장
+                    print(f"[Orchestrator] 등록 완료: {name} / {phone}")
+                    _sync_and_push({"user_name": name, "is_new_user": False, "speaker_verified": True, "screen": "complete"})
+
+            elif atype == "add_menu":
+                # 화면 메뉴 카드 클릭 → 장바구니 추가 (음성 없이)
+                result = cart.add_item(action.get("name", ""))
+                if result.get("success"):
+                    _sync_and_push({
+                        "cart_items": result["cart"]["items"],
+                        "cart_total": result["cart"]["total"],
+                        "screen": "ordering",
+                    })
+
+            elif atype == "retry_verification":
+                # 화자인증 재시도 — 잠금 해제 후 주문 화면 복귀
+                session.failed_verifications = 0
+                _sync_and_push({"screen": "ordering", "speaker_verified": None})
+
     # ── Realtime 연결 ──
     client = RealtimeClient(
         api_key=api_key,
@@ -209,6 +258,7 @@ async def run():
         voice=voice,
         on_audio_delta=on_audio_delta,
         on_text_delta=on_text_delta,
+        on_user_text=on_user_text,
         on_response_done=on_response_done,
         on_function_call=on_function_call,
         on_session_ready=on_session_ready,
@@ -227,11 +277,13 @@ async def run():
     mic.start()
     print("[Orchestrator] 마이크 시작. http://localhost:8000 에서 화면을 확인하세요.")
 
+    _MUTE_SCREENS = {"payment_processing", "register", "complete",
+                      "voice_save_prompt", "card_insert", "app_payment"}
+
     async def mic_to_realtime():
         async for chunk in mic:
-            # 잠금 상태이거나 결제/등록 화면이면 마이크 전송 중단
-            if session.screen in ("payment_processing", "register", "complete"):
-                continue
+            if session.screen in _MUTE_SCREENS:
+                continue   # 주문 완료 / 결제 중에는 AI가 응답 안 해도 됨
             await client.send_audio_chunk(chunk)
 
     try:
@@ -245,7 +297,6 @@ async def run():
     finally:
         mic.stop()
         await client.close()
-        playback.stop()
         print("[Orchestrator] 종료")
 
 

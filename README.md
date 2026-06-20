@@ -2,104 +2,106 @@
 
 손님 목소리로 주문·결제하는 AI 캐셔. **두 모델이 동시에** 동작한다.
 
+## 구현 현황
+
+### ✅ 완료된 기능 (Phase 1 + 2)
+
+| 기능 | 설명 |
+|------|------|
+| 음성 주문 | 마이크 → Realtime API → 텍스트+TTS 응답 |
+| 대화 로그 | 손님/AI 말풍선 실시간 표시 (순서 보장) |
+| 장바구니 | 음성 function calling으로 추가/삭제/조회 |
+| 세트 메뉴 | 포함 구성 항목 표시 (감자튀김+음료 등) |
+| 결제 | 현장카드(카드 삽입 화면 3초 mock) / 앱카드(수단 선택) |
+| 사용자 등록 | 이름+전화번호 → JSON 파일 영구 저장 |
+| 재방문 인식 | 등록 사용자 재시작 시 자동 로드·인사 (Phase 2 mock) |
+| 처음으로 | 세션 전체 초기화 버튼 |
+| 주문 완료 후 | 완료·결제·등록 화면에서 마이크 전송 중단 |
+| 브라우저 TTS | Web Speech API로 AI 응답 한국어 음성 출력 (토글 가능) |
+| 화면 | 대기→주문→결제(대화내용 포함)→처리→완료 전체 흐름 |
+
+### 🔜 예정 (Phase 3)
+- ECAPA-TDNN 화자인증 (PostgreSQL + pgvector)
+- 실제 사용자 목소리 임베딩 저장·매칭
+
+---
+
 ## 아키텍처
 
 ```
-                         ┌─ [화자인증] raw PCM 누적 → ECAPA 임베딩 → pgvector 매칭
-   마이크(16kHz PCM) ─분기┤   (비동기/백그라운드. 1초 응답 경로에 영향 없음. 세션 내내 지속)
-                         └─ [Realtime API] WebSocket 스트리밍 → function calling → 음성 출력
+                         ┌─ [화자인증] ECAPA-TDNN → pgvector 매칭 (Phase 3)
+   마이크(24kHz PCM) ─분기┤
+                         └─ [Realtime API] WebSocket → function calling → 텍스트 응답
                                                    ↓
                                         키오스크 화면 (FastAPI + HTML/JS)
+                                        브라우저 TTS (Web Speech API)
 ```
 
-- **화자인증**은 응답 지연 경로 밖에서 비동기로 돌며 세션 중 지속 검증
-- **대화 엔진**은 WebSocket으로 음성을 실시간 스트리밍해 1초 이내 응답
+## 사용 기술
 
-## 사용 기술과 선택 이유
+| 영역 | 기술 |
+|------|------|
+| 대화 엔진 | OpenAI Realtime API `gpt-realtime-2` (GA, text output) |
+| 캐셔 로직 | Realtime function calling |
+| 화자인증 | SpeechBrain ECAPA-TDNN (Phase 3) |
+| 임베딩 저장 | PostgreSQL + pgvector (Phase 3) |
+| 오디오 입력 | sounddevice (PortAudio) 24kHz mono |
+| 음성 출력 | 브라우저 Web Speech API (ko-KR) |
+| 프론트엔드 | FastAPI + SSE + HTML/JS |
+| 사용자 DB | JSON 파일 (Phase 2 mock) → PostgreSQL (Phase 3) |
 
-| 영역 | 기술 | 선택 이유 |
-|------|------|-----------|
-| 대화 엔진 | OpenAI Realtime API (`gpt-realtime-2`) | 음성-투-음성 통합. STT→LLM→TTS 직렬 조합으로는 1초 응답 불가 |
-| 캐셔 로직 | Realtime function calling | 모델이 맥락에 맞게 메뉴/장바구니/결제 tool 호출 |
-| 화자인증 | SpeechBrain ECAPA-TDNN | 192차원 임베딩, 8GB 맥에서 단독 구동 가능 |
-| 임베딩 저장 | PostgreSQL + pgvector | 코사인 유사도 검색. 생체정보를 클라우드에 위탁하지 않음 |
-| 오디오 I/O | sounddevice (PortAudio) | 마이크 raw PCM(16kHz mono) 캡처 후 두 갈래로 분기 |
-| 프론트엔드 | FastAPI + HTML/JS | 키오스크 화면. Python 단일 스택으로 복잡도 최소화 |
-| 언어 | Python 3.11 | 전 영역을 단일 스택으로 통일 |
+## 변경 이력
 
-## 화자인증 보안 로직
-
-- 대화 시작 시 1회 등록/식별 → 세션 주인(session owner) 고정
-- 매 N초마다 들어오는 음성이 세션 주인과 코사인 유사도 임계값 이상인지 지속 검증
-- 다른 사람으로 판정되면 결제 등 민감 동작 즉시 잠금 + UI 차단
-- 연속 N회 불일치 시 세션 종료/재인증 요구
-- 파라미터(임계값/주기/허용 횟수)는 `.env`에서 조정
+| 날짜 | 내용 |
+|------|------|
+| 2026-06-20 | GA Realtime API 적용 (output_modalities text, 24kHz, session.audio 구조) |
+| 2026-06-20 | 전체 Phase 2 구현 — 장바구니·결제·화면 전체 |
+| 2026-06-20 | 브라우저 TTS, 대화 로그 UI, 결제 화면 대화 내용 표시 |
+| 2026-06-20 | 처음으로 버튼, 현장/앱카드 결제 화면 분리 |
+| 2026-06-20 | 밝은 매장 테마 (크림/오렌지-레드) |
+| 2026-06-21 | 다중 function call 동시 호출 버그 수정 (response.create 중복 방지) |
+| 2026-06-21 | 사용자 등록 JSON 영구 저장 + 재시작 시 자동 인식 |
+| 2026-06-21 | 주문 완료 후 마이크 전송 중단 (complete·register·card_insert 등) |
+| 2026-06-21 | 대화 순서 보장 (손님 발화 → AI 응답) |
 
 ## 디렉터리 구조
 
 ```
-voice-cashier/
-├── .env.example              # 필요한 환경변수 목록
+mvp-ai_Cashier/
+├── .env                        # API 키 (gitignore)
 ├── requirements.txt
-├── docs/
-│   └── history_for_newsession.md  # 세션 인계 파일 (gitignore)
+├── data/
+│   └── users.json              # 등록 사용자 DB (gitignore)
 ├── src/
-│   ├── audio/                # 마이크 캡처/재생/PCM 분기
-│   ├── realtime/             # Realtime API WebSocket 클라이언트·이벤트
-│   ├── tools/                # function calling 핸들러 (메뉴/장바구니/결제)
-│   ├── speaker/              # ECAPA 임베딩, pgvector 식별/지속검증
-│   ├── frontend/             # 키오스크 화면 (FastAPI + HTML/JS)
-│   └── orchestrator/         # 두 파이프라인 통합
-└── tests/                    # 단위 테스트
+│   ├── audio/                  # 마이크 캡처(capture.py) / 재생(playback.py)
+│   ├── realtime/               # Realtime API WebSocket 클라이언트
+│   ├── tools/
+│   │   ├── menu.py             # 메뉴 데이터
+│   │   ├── cart.py             # 장바구니
+│   │   ├── payment.py          # 결제 게이트웨이 (mock)
+│   │   ├── handlers.py         # function call 핸들러
+│   │   └── user_store.py       # 사용자 JSON 저장소
+│   ├── frontend/               # 키오스크 화면 (FastAPI + HTML/JS)
+│   └── orchestrator/           # 메인 파이프라인 통합
+└── tests/                      # 단위 테스트 (54개)
 ```
 
-## 설치 및 실행 (VS Code 기준)
-
-### 사전 준비
-
-1. Python 3.11 설치 확인
-2. PortAudio 설치: `brew install portaudio`
-3. PostgreSQL 설치: `brew install postgresql` (3단계부터 필요)
-
-### 환경 설정
+## 실행
 
 ```bash
-# 1. Python 가상환경 생성
-python3.11 -m venv .venv
+# 가상환경 활성화
 source .venv/bin/activate
 
-# 2. 의존성 설치
-pip install -r requirements.txt
-
-# 3. 환경변수 설정
-cp .env.example .env
-# .env 파일을 열어 OPENAI_API_KEY 등 입력
-```
-
-### 실행
-
-```bash
-# (개발 중 — 단계별로 업데이트 예정)
+# .env에 OPENAI_API_KEY 설정 후
 python -m src.orchestrator.main
 ```
 
-## 필요한 API / 계정
+브라우저에서 `http://localhost:8000` 접속
 
-| 서비스 | 용도 | 발급 경로 |
-|--------|------|-----------|
-| OpenAI API Key | Realtime API 사용 | platform.openai.com |
-| HuggingFace Token | SpeechBrain 모델 다운로드 (공개 모델이면 불필요) | huggingface.co |
+## 필요 환경변수
 
-## 단계별 진행 상황
-
-- [ ] **1단계**: 마이크 → Realtime → 음성 응답 + 최소 화면 (`feature/realtime-voice`)
-- [ ] **2단계**: function calling — 캐셔 로직 + 화면 연동 (`feature/cart-checkout`)
-- [ ] **3단계**: 화자인증 지속 검증 (`feature/speaker-verification`)
-- [ ] **4단계**: 오케스트레이터 통합 (`feature/orchestrator`)
-
-## Git 컨벤션
-
-- 브랜치: `main` ← `dev` ← `feature/<기능>`
-- 커밋: Conventional Commits — `feat(scope): 설명`
-  - 타입: `feat / fix / docs / refactor / test / chore / style`
-  - 본문에 무엇을 왜 했는지 기록
+```
+OPENAI_API_KEY=sk-...
+OPENAI_REALTIME_MODEL=gpt-realtime-2   # 기본값
+OPENAI_REALTIME_VOICE=alloy            # 기본값
+```
