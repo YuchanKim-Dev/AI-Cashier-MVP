@@ -209,6 +209,23 @@ class RealtimeClient:
             if code == "unknown_parameter":
                 print(f"[RealtimeClient] 미지원 파라미터 무시: {err.get('param')}")
 
+    async def update_instructions(self, name: str):
+        """화자 인식 후 AI에게 사용자 이름 알림."""
+        system_prompt = (
+            "당신은 친절하고 빠른 음성 AI 캐셔입니다. 한국어로 짧고 명확하게 응답하세요.\n"
+            "- 손님이 메뉴를 말하면 바로 add_to_cart를 호출하세요.\n"
+            "- 메뉴를 물어보면 recommend_menu를 호출하세요.\n"
+            "- '결제', '주문할게요', '그게 다야' 등의 말이 나오면 checkout을 호출하세요.\n"
+            "- 장바구니가 비어있으면 checkout을 호출하지 마세요.\n"
+            "- 응답은 2문장 이내로 짧게. 불필요한 인사말 반복 금지.\n"
+            "- 가격은 항상 '원' 단위로 말하세요.\n"
+            f"- 이 손님은 목소리로 인식된 '{name}'님입니다. 처음 한 번만 자연스럽게 이름으로 반갑게 인사하세요."
+        )
+        await self._send({
+            "type": "session.update",
+            "session": {"type": "realtime", "instructions": system_prompt},
+        })
+
     async def close(self):
         self._connected = False
         if self._ws:

@@ -14,10 +14,11 @@
 | 세트 메뉴 | 포함 구성 항목 표시 (감자튀김+음료 등) |
 | 결제 | 현장카드(카드 삽입 화면 3초 mock) / 앱카드(수단 선택) |
 | 사용자 등록 | 이름+전화번호 → JSON 파일 영구 저장 |
-| 재방문 인식 | 등록 사용자 재시작 시 자동 로드·인사 (Phase 2 mock) |
+| 화자인식 | ECAPA-TDNN 목소리 임베딩 비교 — 등록 사용자 자동 인식 + 이름 인사 |
+| 재방문 인식 | 등록 사용자 JSON 로드, 다음 발화에 이름으로 인사 |
 | 처음으로 | 세션 전체 초기화 버튼 |
 | 주문 완료 후 | 완료·결제·등록 화면에서 마이크 전송 중단 |
-| 브라우저 TTS | Web Speech API로 AI 응답 한국어 음성 출력 (토글 가능) |
+| TTS | OpenAI TTS API (tts-1-hd / nova 보이스) — 자연스러운 한국어 음성 |
 | 화면 | 대기→주문→결제(대화내용 포함)→처리→완료 전체 흐름 |
 
 ### 🔜 예정 (Phase 3)
@@ -46,7 +47,8 @@
 | 화자인증 | SpeechBrain ECAPA-TDNN (Phase 3) |
 | 임베딩 저장 | PostgreSQL + pgvector (Phase 3) |
 | 오디오 입력 | sounddevice (PortAudio) 24kHz mono |
-| 음성 출력 | 브라우저 Web Speech API (ko-KR) |
+| 음성 출력 | OpenAI TTS API (`tts-1-hd`, nova 보이스) |
+| 화자인식 | SpeechBrain ECAPA-TDNN (목소리 임베딩 비교) |
 | 프론트엔드 | FastAPI + SSE + HTML/JS |
 | 사용자 DB | JSON 파일 (Phase 2 mock) → PostgreSQL (Phase 3) |
 
@@ -63,6 +65,9 @@
 | 2026-06-21 | 사용자 등록 JSON 영구 저장 + 재시작 시 자동 인식 |
 | 2026-06-21 | 주문 완료 후 마이크 전송 중단 (complete·register·card_insert 등) |
 | 2026-06-21 | 대화 순서 보장 (손님 발화 → AI 응답) |
+| 2026-06-21 | 화자인식 구현 — ECAPA-TDNN 목소리 임베딩 비교, 등록 시 임베딩 저장 |
+| 2026-06-21 | TTS 교체 — Web Speech API → OpenAI TTS API (tts-1-hd/nova, 훨씬 자연스러움) |
+| 2026-06-21 | 프리미엄 UI 리디자인 — 다크 헤더 + 클린 라이트 콘텐츠, 카드형 메뉴 |
 
 ## 디렉터리 구조
 

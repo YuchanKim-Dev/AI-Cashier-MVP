@@ -32,14 +32,14 @@ os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
 
 from src.audio.capture import AsyncMicrophoneCapture
-from src.audio.playback import AudioPlayback
 from src.frontend.app import app as fastapi_app, push_state, set_context
 from src.orchestrator.session import SessionState
 from src.realtime.client import RealtimeClient
+from src.audio.speaker_verify import preload_model, extract_embedding, find_user
 from src.tools.cart import CartManager
 from src.tools.handlers import FunctionCallHandler
 from src.tools.payment import payment_gateway
-from src.tools.user_store import save_user, get_first_user
+from src.tools.user_store import save_user, get_all_users, get_first_user
 
 load_dotenv()
 
@@ -102,6 +102,12 @@ async def run():
     _pending_ai: str = ""    # user transcript 오기 전에 완성된 AI 텍스트
     _pending_user: str = ""  # AI 응답 오기 전에 도착한 user transcript
 
+    # ── 화자 인식 상태 ──
+    _voice_buffer: bytearray = bytearray()
+    _MAX_BUFFER   = 24000 * 2 * 6  # 6초 분량 (24kHz int16)
+    _is_listening = False
+    _verification_done = False
+
     voice = os.getenv("OPENAI_REALTIME_VOICE", "alloy")
     model = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2")
     loop  = asyncio.get_event_loop()
@@ -158,30 +164,71 @@ async def run():
         push_state(session.to_dict())
 
     def on_session_ready():
+        nonlocal _verification_done, _voice_buffer, _is_listening
         print("[Orchestrator] Realtime 준비 완료. 말씀하세요!")
-        # 파일 DB에서 마지막 등록 사용자 로드 (Phase 2 mock 인식)
-        known_user = get_first_user()
-        greeting = "안녕하세요! 주문을 도와드릴게요. 무엇을 드시겠어요?"
-        if known_user:
-            session.user_name = known_user["name"]
-            session.is_new_user = False
-            session.speaker_verified = True
-            greeting = f"어서오세요, {known_user['name']}님! 오늘도 주문 도와드릴게요."
-            print(f"[Orchestrator] 등록 사용자 로드: {known_user['name']}")
+        # 화자인식 사용 가능 여부에 따라 인사 문구 다름
+        has_registered = bool(get_all_users())
+        if has_registered:
+            greeting = "안녕하세요! 목소리를 확인하는 중입니다. 말씀해 주세요."
+        else:
+            greeting = "안녕하세요! 주문을 도와드릴게요. 무엇을 드시겠어요?"
+        _verification_done = False
+        _voice_buffer = bytearray()
+        _is_listening  = False
         session.conversation_log = [{"role": "ai", "text": greeting}]
         _sync_and_push({"mic": "active", "screen": "waiting"})
 
+    async def _run_speaker_verify():
+        """첫 발화 종료 후 화자인식 실행 (백그라운드 태스크)."""
+        nonlocal _verification_done
+        if _verification_done:
+            return
+        _verification_done = True
+
+        audio_data = bytes(_voice_buffer)
+        # 최소 1초 (24000 * 2 bytes = 48000) 이상 필요
+        if len(audio_data) < 48_000:
+            print("[Speaker] 오디오 불충분 — 화자인식 건너뜀")
+            return
+
+        try:
+            emb = await extract_embedding(audio_data, sample_rate=24000)
+            if emb is None:
+                return
+            match = find_user(emb, get_all_users())
+            if match:
+                session.user_name     = match["name"]
+                session.is_new_user   = False
+                session.speaker_verified = True
+                print(f"[Speaker] 인식됨: {match['name']}")
+                # AI 지시사항 업데이트 → 다음 응답부터 이름으로 인사
+                await client.update_instructions(match["name"])
+                push_state(session.to_dict())
+            else:
+                print("[Speaker] 등록된 사용자 없음 / 유사도 낮음")
+                session.speaker_verified = False
+                push_state(session.to_dict())
+        except Exception as e:
+            print(f"[Speaker] 오류: {e}")
+
     def on_status_update(status: str, ts: float):
+        nonlocal _is_listening
         if status == "listening":
+            _is_listening = True
             session.ai_text = ""           # 새 발화 시작 시 텍스트 초기화
             session.on_speech_start(ts)
             session.conversation = "listening"
             if session.screen == "waiting":
                 session.screen = "ordering"
         elif status == "processing":
+            _is_listening = False
             session.on_speech_end(ts)
             session.conversation = "processing"
+            # 첫 발화 종료 → 화자인식 트리거 (비동기, 논블로킹)
+            if not _verification_done and len(_voice_buffer) >= 48_000:
+                loop.create_task(_run_speaker_verify())
         elif status in ("idle", "speaking_done"):
+            _is_listening = False
             session.conversation = "idle"
         push_state(session.to_dict())
 
@@ -232,8 +279,18 @@ async def run():
                 name  = action.get("name", "").strip()
                 phone = action.get("phone", "").strip()
                 if name and phone:
-                    save_user(name, phone)   # JSON 파일에 영구 저장
-                    print(f"[Orchestrator] 등록 완료: {name} / {phone}")
+                    # 현재 세션에서 수집된 목소리 임베딩 함께 저장
+                    emb = None
+                    if len(_voice_buffer) >= 48_000:
+                        try:
+                            emb = await extract_embedding(bytes(_voice_buffer))
+                        except Exception as e:
+                            print(f"[Orchestrator] 임베딩 추출 실패: {e}")
+                    save_user(name, phone, embedding=emb)
+                    if emb:
+                        print(f"[Orchestrator] 등록 완료 (임베딩 포함): {name} / {phone}")
+                    else:
+                        print(f"[Orchestrator] 등록 완료 (임베딩 없음): {name} / {phone}")
                     _sync_and_push({"user_name": name, "is_new_user": False, "speaker_verified": True, "screen": "complete"})
 
             elif atype == "add_menu":
@@ -269,7 +326,6 @@ async def run():
         await client.connect()
     except Exception as e:
         print(f"[Orchestrator] Realtime 연결 실패: {e}")
-        playback.stop()
         return
 
     # 마이크 캡처
@@ -284,6 +340,9 @@ async def run():
         async for chunk in mic:
             if session.screen in _MUTE_SCREENS:
                 continue   # 주문 완료 / 결제 중에는 AI가 응답 안 해도 됨
+            # 화자인식용 버퍼 — 인식 완료 전까지만, 최대 6초
+            if not _verification_done and len(_voice_buffer) < _MAX_BUFFER:
+                _voice_buffer.extend(chunk)
             await client.send_audio_chunk(chunk)
 
     try:
@@ -305,8 +364,13 @@ def main():
     server_thread.start()
     print("[Orchestrator] 키오스크 화면: http://localhost:8000")
 
+    async def _run_all():
+        # 화자인식 모델 백그라운드 로드 (Realtime 연결과 동시)
+        asyncio.create_task(preload_model())
+        await run()
+
     try:
-        asyncio.run(run())
+        asyncio.run(_run_all())
     except KeyboardInterrupt:
         print("\n[Orchestrator] 종료합니다.")
 

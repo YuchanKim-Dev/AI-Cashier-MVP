@@ -23,15 +23,20 @@ def _save(users: list[dict]):
         json.dump(users, f, ensure_ascii=False, indent=2)
 
 
-def save_user(name: str, phone: str):
+def save_user(name: str, phone: str, embedding: list = None):
     """사용자 등록 (이미 있으면 업데이트)."""
     users = _load()
     for u in users:
         if u["phone"] == phone:
             u["name"] = name
+            if embedding is not None:
+                u["embedding"] = embedding
             _save(users)
             return
-    users.append({"name": name, "phone": phone})
+    user: dict = {"name": name, "phone": phone}
+    if embedding is not None:
+        user["embedding"] = embedding
+    users.append(user)
     _save(users)
 
 
