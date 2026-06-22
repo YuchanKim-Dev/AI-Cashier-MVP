@@ -217,7 +217,7 @@ async def run_session(session_id: str):
             # 브라우저 오디오 버퍼 소진 후 마이크 재활성 (500ms 여유)
             async def _reenable_mic():
                 nonlocal _ai_speaking
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.05)
                 _ai_speaking = False
             loop.create_task(_reenable_mic())
         push_session_state(session_id, session.to_dict())
