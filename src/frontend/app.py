@@ -772,8 +772,15 @@ body {
   width: 100%;
   align-items: flex-start;
   justify-content: flex-start;
-  flex-direction: row !important;
+  flex-direction: column !important;
+  gap: 12px;
+}
+#checkout-body {
+  display: flex;
+  flex-direction: row;
   gap: 18px;
+  width: 100%;
+  align-items: flex-start;
 }
 #checkout-left {
   flex: 1;
@@ -1095,46 +1102,49 @@ body {
 
   <!-- 결제 확인 -->
   <div class="screen" id="screen-checkout">
-    <!-- 인사 배너 (목소리 인식 성공 또는 신원 확인 후) -->
-    <div id="checkout-greeting" style="display:none;align-items:center;gap:10px;background:var(--accent);color:#fff;padding:12px 20px;border-radius:14px;margin-bottom:14px;font-size:1.05rem;font-weight:700;width:100%;">
+    <!-- 인사 배너 (목소리 인식 성공 또는 신원 확인 후) — 전체 너비 상단 -->
+    <div id="checkout-greeting" style="display:none;align-items:center;gap:10px;background:var(--accent);color:#fff;padding:12px 20px;border-radius:14px;font-size:1.05rem;font-weight:700;width:100%;">
       <span style="font-size:1.3rem;">👋</span>
       <span id="checkout-greeting-text">안녕하세요!</span>
     </div>
-    <!-- 신원 확인 폼 (목소리 미인식 시) -->
-    <div id="checkout-identify" style="display:none;background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:14px 18px;margin-bottom:14px;width:100%;">
-      <div style="font-size:.88rem;font-weight:700;color:var(--text);margin-bottom:10px;">어떻게 부르면 될까요? <span style="font-weight:400;color:var(--muted);font-size:.8rem;">(선택)</span></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <input class="kiosk-input" id="identify-name" type="text" placeholder="이름" autocomplete="off" style="flex:1;min-width:100px;padding:8px 12px;font-size:.9rem;">
-        <input class="kiosk-input" id="identify-phone" type="tel" placeholder="전화번호" autocomplete="off" style="flex:2;min-width:140px;padding:8px 12px;font-size:.9rem;">
-        <button class="btn btn-primary" style="padding:8px 16px;font-size:.85rem;" onclick="submitIdentify()">확인</button>
-        <button class="btn btn-outline" style="padding:8px 12px;font-size:.85rem;" onclick="skipIdentify()">건너뛰기</button>
+    <!-- 신원 확인 폼 — 전체 너비 상단 (채팅 위에 배치, 가리지 않음) -->
+    <div id="checkout-identify" style="display:none;background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:12px 16px;width:100%;">
+      <div style="font-size:.82rem;font-weight:700;color:var(--text2);margin-bottom:8px;">어떻게 부르면 될까요? <span style="font-weight:400;color:var(--muted);">(선택사항)</span></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <input class="kiosk-input" id="identify-name" type="text" placeholder="이름" autocomplete="off" style="flex:1;min-width:80px;padding:7px 11px;font-size:.86rem;">
+        <input class="kiosk-input" id="identify-phone" type="tel" placeholder="전화번호" autocomplete="off" style="flex:2;min-width:120px;padding:7px 11px;font-size:.86rem;">
+        <button class="btn btn-primary btn-sm" onclick="submitIdentify()">확인</button>
+        <button class="btn btn-outline btn-sm" onclick="skipIdentify()">건너뛰기</button>
       </div>
-      <div id="identify-error" style="color:#b91c1c;font-size:.78rem;margin-top:6px;display:none;"></div>
+      <div id="identify-error" style="color:var(--red);font-size:.76rem;margin-top:5px;display:none;"></div>
     </div>
-    <div id="checkout-left">
-      <div id="checkout-left-header">대화 내용</div>
-      <div id="checkout-convo"></div>
-    </div>
-    <div id="checkout-right">
-      <div class="checkout-title">주문 확인</div>
-      <div id="checkout-summary"></div>
-      <div>
-        <div class="pay-section-title">결제 수단</div>
-        <div class="pay-buttons">
-          <button class="pay-method-btn" onclick="selectPayment('app_card')">
-            <div class="pay-method-icon">📱</div>
-            <div>
-              <div class="pay-method-name">앱 카드</div>
-              <div class="pay-method-desc">등록된 앱 카드로 결제</div>
-            </div>
-          </button>
-          <button class="pay-method-btn" onclick="selectPayment('physical_card')">
-            <div class="pay-method-icon">💳</div>
-            <div>
-              <div class="pay-method-name">현장 카드</div>
-              <div class="pay-method-desc">카드 단말기에 삽입</div>
-            </div>
-          </button>
+    <!-- 채팅 + 주문요약 row -->
+    <div id="checkout-body">
+      <div id="checkout-left">
+        <div id="checkout-left-header">대화 내용</div>
+        <div id="checkout-convo"></div>
+      </div>
+      <div id="checkout-right">
+        <div class="checkout-title">주문 확인</div>
+        <div id="checkout-summary"></div>
+        <div>
+          <div class="pay-section-title">결제 수단</div>
+          <div class="pay-buttons">
+            <button class="pay-method-btn" onclick="selectPayment('app_card')">
+              <div class="pay-method-icon">📱</div>
+              <div>
+                <div class="pay-method-name">앱 카드</div>
+                <div class="pay-method-desc">등록된 앱 카드로 결제</div>
+              </div>
+            </button>
+            <button class="pay-method-btn" onclick="selectPayment('physical_card')">
+              <div class="pay-method-icon">💳</div>
+              <div>
+                <div class="pay-method-name">현장 카드</div>
+                <div class="pay-method-desc">카드 단말기에 삽입</div>
+              </div>
+            </button>
+          </div>
         </div>
       </div>
     </div>

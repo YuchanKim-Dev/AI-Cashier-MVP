@@ -97,7 +97,7 @@ async def run_session(session_id: str):
     _verified_embedding: list | None = None  # 인증된 사용자의 임베딩
     _last_mid_check = 0.0         # 마지막 중간 화자 확인 시각
     _utterance_count = 0          # 이번 세션 발화 횟수
-    voice = os.getenv("OPENAI_REALTIME_VOICE", "shimmer")
+    voice = os.getenv("OPENAI_REALTIME_VOICE", "coral")
     model = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2")
     loop  = asyncio.get_event_loop()
 
@@ -381,8 +381,16 @@ async def run_session(session_id: str):
             atype = action.get("type")
 
             if atype == "reset":
+                nonlocal _is_listening, _ai_speaking, _ai_audio_bytes, _mic_reenable_scheduled
+                _is_listening = False
+                _ai_speaking = False
+                _ai_audio_bytes = 0
+                _mic_reenable_scheduled = False
+                _check_buffer.clear()
                 session.__init__()
                 cart.clear()
+                # 진행 중인 Realtime 응답 취소
+                loop.create_task(client.cancel_response())
                 push_session_state(session_id, session.to_dict())
 
             elif atype == "start":
@@ -506,13 +514,13 @@ async def run_session(session_id: str):
             chunk = await audio_queue.get()
             if session.screen in _MUTE_SCREENS:
                 continue
-            # 화자인증 버퍼: AI 말하는 중 제외
             if not _ai_speaking:
-                if not _verification_done and len(_voice_buffer) < _MAX_BUFFER:
-                    _voice_buffer.extend(chunk)
-                # 중간 화자 확인용 버퍼 (발화 중에만)
-                if _is_listening and len(_check_buffer) < _MAX_BUFFER:
-                    _check_buffer.extend(chunk)
+                # 침묵 제외 — VAD가 발화 감지할 때만 버퍼에 수집 (임베딩 품질 향상)
+                if _is_listening:
+                    if not _verification_done and len(_voice_buffer) < _MAX_BUFFER:
+                        _voice_buffer.extend(chunk)
+                    if len(_check_buffer) < _MAX_BUFFER:
+                        _check_buffer.extend(chunk)
             if _ai_speaking:
                 continue  # Realtime API 전송만 막음 — echo loop 방지
             await client.send_audio_chunk(chunk)
