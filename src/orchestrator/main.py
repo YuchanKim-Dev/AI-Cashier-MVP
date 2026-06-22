@@ -330,16 +330,22 @@ async def run_session(session_id: str):
                 name  = action.get("name", "").strip()
                 phone = action.get("phone", "").strip()
                 if name and phone:
+                    # 현재 세션에서 녹음된 목소리 임베딩 추출
+                    emb = None
+                    if len(_voice_buffer) >= 48_000:
+                        try:
+                            emb = await extract_embedding(bytes(_voice_buffer), sample_rate=24000)
+                        except Exception as e:
+                            print(f"[{sid}] identify 임베딩 추출 실패: {e}")
                     existing = find_user_by_phone(phone)
                     if existing:
-                        existing["name"] = name
-                        save_user(name, phone, embedding=existing.get("embedding"))
+                        save_user(name, phone, embedding=emb or existing.get("embedding"))
                         session.is_new_user = False
-                        print(f"[{sid}] 기존 사용자 확인: {name}")
+                        print(f"[{sid}] 기존 사용자 확인 + 목소리 업데이트: {name}")
                     else:
-                        save_user(name, phone)
+                        save_user(name, phone, embedding=emb)
                         session.is_new_user = False
-                        print(f"[{sid}] 신규 등록: {name}")
+                        print(f"[{sid}] 신규 등록 (목소리{'저장됨' if emb else ' 없음'}): {name}")
                     session.user_name  = name
                     session.user_phone = phone
                     _push({"user_name": name, "user_phone": phone, "is_new_user": session.is_new_user})
