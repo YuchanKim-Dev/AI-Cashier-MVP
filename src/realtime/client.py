@@ -86,7 +86,8 @@ class RealtimeClient:
             "- Call checkout when customer is done ordering. Never if cart is empty.\n"
             "- On checkout screen: call select_payment('app_card') or select_payment('physical_card') based on what customer says.\n"
             "- If customer asks anything unrelated to food ordering, say only: '주문을 도와드릴게요.' (Korean) or 'I can only help with your order.' (English)\n"
-            "- MAX 1 short sentence per response. No filler. No repeated greetings."
+            "- MAX 1 short sentence per response. No filler. No repeated greetings.\n"
+            "- Speak fast and energetically."
         )
         event = {
             "type": "session.update",
@@ -214,6 +215,12 @@ class RealtimeClient:
             if transcript and self.on_user_text:
                 self.on_user_text(transcript)
 
+        # ── AI 발화 전사 완료 (audio 모달리티 → 채팅 로그용)
+        elif t == "response.audio_transcript.done":
+            transcript = event.get("transcript", "").strip()
+            if transcript and self.on_text_delta:
+                self.on_text_delta(transcript)
+
         # ── 오디오 출력 완료 (GA/Beta 호환)
         elif t in ("response.output_audio.done", "response.audio.done"):
             if self.on_status_update:
@@ -239,6 +246,7 @@ class RealtimeClient:
             "- On checkout screen: call select_payment('app_card') or select_payment('physical_card') based on what customer says.\n"
             "- If customer asks anything unrelated to food ordering, say only: '주문을 도와드릴게요.' (Korean) or 'I can only help with your order.' (English)\n"
             "- MAX 1 short sentence per response. No filler. No repeated greetings.\n"
+            "- Speak fast and energetically.\n"
             f"- This customer is '{name}', recognized by voice. Greet by name once, then take the order."
         )
         await self._send({

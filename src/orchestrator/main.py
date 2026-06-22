@@ -90,7 +90,7 @@ async def run_session(session_id: str):
     _is_listening = False
     _verification_done = False
     _ai_speaking = False  # AI 오디오 재생 중 → 마이크 뮤트
-    voice = os.getenv("OPENAI_REALTIME_VOICE", "alloy")
+    voice = os.getenv("OPENAI_REALTIME_VOICE", "shimmer")
     model = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2")
     loop  = asyncio.get_event_loop()
 
