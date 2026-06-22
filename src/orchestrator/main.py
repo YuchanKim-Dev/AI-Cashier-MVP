@@ -21,7 +21,6 @@ import asyncio
 import os
 import ssl
 import time
-import threading
 
 import certifi
 import uvicorn
@@ -52,10 +51,10 @@ from src.tools.user_store import (
 load_dotenv()
 
 
-# ─── FastAPI 서버 (별도 스레드) ────────────────────────────────────────────────
-def start_frontend_server():
+async def _start_frontend_server():
     config = uvicorn.Config(fastapi_app, host="0.0.0.0", port=8000, log_level="warning")
-    uvicorn.Server(config).run()
+    server = uvicorn.Server(config)
+    await server.serve()
 
 
 # ─── 세션 워커 ─────────────────────────────────────────────────────────────────
@@ -387,13 +386,15 @@ async def run():
 
 
 def main():
-    server_thread = threading.Thread(target=start_frontend_server, daemon=True)
-    server_thread.start()
     print("[Orchestrator] 키오스크 화면: http://localhost:8000")
 
     async def _run_all():
         asyncio.create_task(preload_model())
-        await run()
+        # uvicorn과 오케스트레이터를 같은 이벤트 루프에서 실행 — 큐 공유 안전
+        await asyncio.gather(
+            _start_frontend_server(),
+            run(),
+        )
 
     try:
         asyncio.run(_run_all())

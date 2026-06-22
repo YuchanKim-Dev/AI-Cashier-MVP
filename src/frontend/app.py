@@ -80,10 +80,10 @@ def push_session_state(session_id: str, state: dict):
         return
     sess["state"].update(state)
     data = json.dumps(sess["state"], ensure_ascii=False)
-    for q in sess["sse_queues"]:
+    for q in list(sess["sse_queues"]):
         try:
             q.put_nowait(data)
-        except asyncio.QueueFull:
+        except (asyncio.QueueFull, Exception):
             pass
 
 
@@ -1238,41 +1238,77 @@ let _audioUnlocked  = false; // 브라우저 autoplay 잠금 해제 여부
 const SESSION_ID = '__SESSION_ID__';
 
 // 첫 클릭/터치 시 오디오 컨텍스트 잠금 해제
-document.addEventListener('click', function _unlock() {
+document.addEventListener('click', function() {
   _audioUnlocked = true;
-  startBrowserMic();  // 첫 클릭 시 마이크 시작
-}, { capture: true, once: true });
+  startBrowserMic();  // 첫 클릭 시 마이크 시작 (_micStarted로 중복 방지)
+}, { capture: true });
 
 // ── 브라우저 마이크 → WebSocket 스트리밍 ──
 let _micStarted = false;
+let _audioWs = null;
+
 async function startBrowserMic() {
   if (_micStarted) return;
   _micStarted = true;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    // AudioContext를 24kHz로 생성 — 브라우저가 자동으로 리샘플링
-    const ctx = new AudioContext({ sampleRate: 24000 });
-    const source = ctx.createMediaStreamSource(stream);
-    const processor = ctx.createScriptProcessor(2400, 1, 1);  // 100ms 청크
-    const ws = new WebSocket((location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws/audio?sid=' + SESSION_ID);
-    ws.binaryType = 'arraybuffer';
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      video: false,
+    });
 
-    processor.onaudioprocess = (e) => {
-      if (ws.readyState !== WebSocket.OPEN) return;
-      const f32 = e.inputBuffer.getChannelData(0);
-      // float32 → int16 PCM 변환
-      const i16 = new Int16Array(f32.length);
-      for (let i = 0; i < f32.length; i++) {
-        const s = Math.max(-1, Math.min(1, f32[i]));
-        i16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    // 48kHz: 모든 브라우저에서 보장 지원. 24kHz는 폴백될 수 있어서 사용 안 함.
+    const ctx = new AudioContext({ sampleRate: 48000 });
+    await ctx.resume();
+
+    const wsUrl = (location.protocol==='https:' ? 'wss:' : 'ws:')
+                  + '//' + location.host + '/ws/audio?sid=' + SESSION_ID;
+    _audioWs = new WebSocket(wsUrl);
+    _audioWs.binaryType = 'arraybuffer';
+    _audioWs.onopen  = () => console.log('[Mic] WS 연결됨');
+    _audioWs.onerror = (e) => console.warn('[Mic] WS 오류:', e);
+    _audioWs.onclose = () => { console.log('[Mic] WS 닫힘'); };
+
+    // AudioWorklet으로 PCM 캡처 (ScriptProcessorNode는 deprecated)
+    const workletSrc = `
+class PCMProcessor extends AudioWorkletProcessor {
+  constructor() { super(); this._buf = []; }
+  process(inputs) {
+    const ch = inputs[0][0];
+    if (!ch) return true;
+    for (let i = 0; i < ch.length; i++) this._buf.push(ch[i]);
+    // 48kHz 100ms = 4800 frames
+    if (this._buf.length >= 4800) {
+      this.port.postMessage(new Float32Array(this._buf.splice(0, 4800)));
+    }
+    return true;
+  }
+}
+registerProcessor('pcm-proc', PCMProcessor);`;
+    const blob = new Blob([workletSrc], { type: 'application/javascript' });
+    const url  = URL.createObjectURL(blob);
+    await ctx.audioWorklet.addModule(url);
+    URL.revokeObjectURL(url);
+
+    const source  = ctx.createMediaStreamSource(stream);
+    const worklet = new AudioWorkletNode(ctx, 'pcm-proc');
+
+    worklet.port.onmessage = ({ data: f32 }) => {
+      if (!_audioWs || _audioWs.readyState !== WebSocket.OPEN) return;
+      // 48000Hz → 24000Hz 다운샘플 (2:1 평균)
+      const out = new Int16Array(f32.length >> 1);
+      for (let i = 0; i < out.length; i++) {
+        const s = Math.max(-1, Math.min(1, (f32[i*2] + f32[i*2+1]) * 0.5));
+        out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
       }
-      ws.send(i16.buffer);
+      _audioWs.send(out.buffer);
     };
-    source.connect(processor);
-    processor.connect(ctx.destination);
-    console.log('[Mic] 브라우저 마이크 시작 (24kHz)');
+
+    source.connect(worklet);
+    // worklet은 destination에 연결하지 않음 → 스피커로 안 나감
+    console.log('[Mic] AudioWorklet 시작 (48kHz → 24kHz)');
   } catch(e) {
     console.warn('[Mic] 마이크 접근 실패:', e);
+    _micStarted = false;  // 재시도 허용
   }
 }
 
@@ -1294,15 +1330,24 @@ function toggleTTS() {
   }
 }
 
+// TTS prefetch: AI 텍스트가 완성되는 즉시 fetch → ArrayBuffer로 받아두고 바로 재생
+// new Audio(url)은 네트워크 왕복이 두 번 걸리는 문제 있음
 async function speakText(text) {
   if (!ttsEnabled || !text || !_audioUnlocked) return;
   try {
     if (_ttsAudio) { _ttsAudio.pause(); _ttsAudio = null; }
     const url = '/tts?text=' + encodeURIComponent(text);
-    const audio = new Audio(url);
+    const resp = await fetch(url);
+    if (!resp.ok) return;
+    const blob = await resp.blob();
+    const objUrl = URL.createObjectURL(blob);
+    const audio = new Audio(objUrl);
     _ttsAudio = audio;
     audio.play().catch(() => {});
-    audio.onended = () => { if (_ttsAudio === audio) _ttsAudio = null; };
+    audio.onended = () => {
+      if (_ttsAudio === audio) _ttsAudio = null;
+      URL.revokeObjectURL(objUrl);
+    };
   } catch(e) { console.warn('TTS 오류:', e); }
 }
 
