@@ -233,21 +233,8 @@ class RealtimeClient:
         })
 
     async def greet_returning_user(self, name: str):
-        """화자 인식 완료 후 이름 인사를 보장하는 메서드.
-        현재 응답 중이면 지시사항만 업데이트; 유휴 상태면 즉시 인사 응답 생성.
-        """
+        """화자 인식 완료 — 주문 흐름 방해 없이 지시사항만 조용히 업데이트."""
         await self.update_instructions(name)
-        if not self._response_active:
-            # AI가 현재 응답 중이 아닐 때만 즉시 인사 트리거
-            await self._send({
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "(목소리 인식 완료)"}],
-                },
-            })
-            await self._send({"type": "response.create"})
 
     async def close(self):
         self._connected = False

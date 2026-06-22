@@ -23,9 +23,10 @@ class SessionState:
     conversation_log: list = field(default_factory=list)  # [{role, text}] 전체 대화 이력
 
     # 사용자 정보
-    user_name: Optional[str] = None  # 인식된/입력된 이름 (None = 신규)
-    is_new_user: bool = True         # False = DB에서 찾은 기존 사용자
-    speaker_verified: Optional[bool] = None  # None|True|False (3단계에서 실제 동작)
+    user_name: Optional[str] = None   # 인식된/입력된 이름 (None = 미확인)
+    user_phone: Optional[str] = None  # 체크아웃에서 입력된 전화번호
+    is_new_user: bool = True          # False = DB에서 찾은 기존 사용자
+    speaker_verified: Optional[bool] = None  # None|True|False
     failed_verifications: int = 0    # 연속 화자 불일치 횟수
 
     # 장바구니 (frontend에 실시간 전달용 — 실제 데이터는 CartManager)
@@ -50,6 +51,7 @@ class SessionState:
             "user_text": self.user_text,
             "conversation_log": self.conversation_log,
             "user_name": self.user_name,
+            "user_phone": self.user_phone,
             "is_new_user": self.is_new_user,
             "speaker_verified": self.speaker_verified,
             "failed_verifications": self.failed_verifications,

@@ -15,79 +15,114 @@
 import asyncio
 import json
 import os
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import AsyncGenerator, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
 app = FastAPI(title="Voice AI Cashier Kiosk")
 
-_state: dict = {
-    "screen": "waiting",
-    "conversation": "idle",
-    "mic": "active",
-    "ai_text": "",
-    "user_text": "",
-    "conversation_log": [],
-    "user_name": None,
-    "is_new_user": True,
-    "speaker_verified": None,
-    "failed_verifications": 0,
-    "cart_items": [],
-    "cart_total": 0,
-    "payment_method": None,
-    "transaction_id": None,
-    "voice_duration": 0.0,
-}
-_sse_queues: list[asyncio.Queue] = []
-_action_queue: Optional[asyncio.Queue] = None
-_main_loop: Optional[asyncio.AbstractEventLoop] = None
-_tts_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tts")
+# ── 세션 관리 (접속마다 독립 세션) ──────────────────────────────────────────────
+_sessions: dict[str, dict] = {}
+_new_session_queue: asyncio.Queue = asyncio.Queue()
+_tts_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tts")
 
 
-def set_context(action_queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
-    global _action_queue, _main_loop
-    _action_queue = action_queue
-    _main_loop = loop
+def _default_state() -> dict:
+    return {
+        "screen": "waiting",
+        "conversation": "idle",
+        "mic": "active",
+        "ai_text": "",
+        "user_text": "",
+        "conversation_log": [],
+        "user_name": None,
+        "is_new_user": True,
+        "speaker_verified": None,
+        "failed_verifications": 0,
+        "cart_items": [],
+        "cart_total": 0,
+        "payment_method": None,
+        "transaction_id": None,
+        "voice_duration": 0.0,
+    }
 
 
-def push_state(updates: dict):
-    _state.update(updates)
-    data = json.dumps(_state, ensure_ascii=False)
-    for q in _sse_queues:
+def create_session(session_id: str) -> dict:
+    sess = {
+        "sse_queues": [],
+        "audio_queue": asyncio.Queue(maxsize=300),
+        "action_queue": asyncio.Queue(),
+        "state": _default_state(),
+    }
+    _sessions[session_id] = sess
+    _new_session_queue.put_nowait(session_id)
+    return sess
+
+
+def get_session(session_id: str) -> dict | None:
+    return _sessions.get(session_id)
+
+
+def remove_session(session_id: str):
+    _sessions.pop(session_id, None)
+
+
+def get_new_session_queue() -> asyncio.Queue:
+    return _new_session_queue
+
+
+def push_session_state(session_id: str, state: dict):
+    sess = _sessions.get(session_id)
+    if not sess:
+        return
+    sess["state"].update(state)
+    data = json.dumps(sess["state"], ensure_ascii=False)
+    for q in sess["sse_queues"]:
         try:
             q.put_nowait(data)
         except asyncio.QueueFull:
             pass
 
 
-def _enqueue_action(action: dict):
-    if _main_loop and _action_queue:
-        _main_loop.call_soon_threadsafe(_action_queue.put_nowait, action)
+def _get_sid(request: Request) -> str:
+    return request.headers.get("X-Session-Id", "")
+
+
+async def _enqueue(session_id: str, action: dict):
+    sess = get_session(session_id)
+    if sess:
+        await sess["action_queue"].put(action)
 
 
 # ─── HTTP 엔드포인트 ────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    return HTMLResponse(content=_build_html())
+    session_id = str(uuid.uuid4())
+    create_session(session_id)
+    return HTMLResponse(content=_build_html(session_id))
 
 
 @app.get("/events")
-async def sse():
+async def sse(sid: str = ""):
+    sess = get_session(sid)
+    if not sess:
+        return Response(status_code=404)
     q: asyncio.Queue = asyncio.Queue(maxsize=50)
-    _sse_queues.append(q)
+    sess["sse_queues"].append(q)
 
     async def generate() -> AsyncGenerator[str, None]:
-        yield f"data: {json.dumps(_state, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps(sess['state'], ensure_ascii=False)}\n\n"
         try:
             while True:
                 data = await q.get()
                 yield f"data: {data}\n\n"
         finally:
-            if q in _sse_queues:
-                _sse_queues.remove(q)
+            if q in sess["sse_queues"]:
+                sess["sse_queues"].remove(q)
 
     return StreamingResponse(
         generate(),
@@ -128,29 +163,29 @@ async def tts_endpoint(text: str):
 
 
 @app.post("/action/checkout")
-async def action_checkout():
-    _enqueue_action({"type": "checkout"})
+async def action_checkout(request: Request):
+    await _enqueue(_get_sid(request), {"type": "checkout"})
     return {"ok": True}
 
 
 @app.post("/action/payment")
 async def action_payment(request: Request):
     body = await request.json()
-    _enqueue_action({"type": "payment", "method": body.get("method", "physical_card")})
+    await _enqueue(_get_sid(request), {"type": "payment", "method": body.get("method", "physical_card")})
     return {"ok": True}
 
 
 @app.post("/action/save_voice")
 async def action_save_voice(request: Request):
     body = await request.json()
-    _enqueue_action({"type": "save_voice", "save": body.get("save", False)})
+    await _enqueue(_get_sid(request), {"type": "save_voice", "save": body.get("save", False)})
     return {"ok": True}
 
 
 @app.post("/action/register")
 async def action_register(request: Request):
     body = await request.json()
-    _enqueue_action({
+    await _enqueue(_get_sid(request), {
         "type": "register",
         "name": body.get("name", "").strip(),
         "phone": body.get("phone", "").strip(),
@@ -159,34 +194,63 @@ async def action_register(request: Request):
 
 
 @app.post("/action/retry_verification")
-async def action_retry():
-    _enqueue_action({"type": "retry_verification"})
+async def action_retry(request: Request):
+    await _enqueue(_get_sid(request), {"type": "retry_verification"})
+    return {"ok": True}
+
+
+@app.post("/action/identify")
+async def action_identify(request: Request):
+    body = await request.json()
+    await _enqueue(_get_sid(request), {
+        "type": "identify",
+        "name": body.get("name", "").strip(),
+        "phone": body.get("phone", "").strip(),
+    })
     return {"ok": True}
 
 
 @app.post("/action/add_menu")
 async def action_add_menu(request: Request):
     body = await request.json()
-    _enqueue_action({"type": "add_menu", "name": body.get("name", "")})
+    await _enqueue(_get_sid(request), {"type": "add_menu", "name": body.get("name", "")})
     return {"ok": True}
 
 
 @app.post("/action/start")
-async def action_start():
-    _enqueue_action({"type": "start"})
+async def action_start(request: Request):
+    await _enqueue(_get_sid(request), {"type": "start"})
     return {"ok": True}
 
 
 @app.post("/action/reset")
-async def action_reset():
-    _enqueue_action({"type": "reset"})
+async def action_reset(request: Request):
+    await _enqueue(_get_sid(request), {"type": "reset"})
     return {"ok": True}
+
+
+@app.websocket("/ws/audio")
+async def audio_ws(websocket: WebSocket, sid: str = ""):
+    await websocket.accept()
+    sess = get_session(sid)
+    if not sess:
+        await websocket.close()
+        return
+    try:
+        while True:
+            data = await websocket.receive_bytes()
+            try:
+                sess["audio_queue"].put_nowait(data)
+            except asyncio.QueueFull:
+                pass
+    except (WebSocketDisconnect, Exception):
+        pass
 
 
 @app.post("/action/app_payment_confirm")
 async def action_app_payment_confirm(request: Request):
     body = await request.json()
-    _enqueue_action({"type": "app_payment_confirm", "method": body.get("method", "신용카드")})
+    await _enqueue(_get_sid(request), {"type": "app_payment_confirm", "method": body.get("method", "신용카드")})
     return {"ok": True}
 
 
@@ -197,8 +261,8 @@ async def app_demo():
 
 # ─── HTML ──────────────────────────────────────────────────────────────────────
 
-def _build_html() -> str:
-    return r"""<!DOCTYPE html>
+def _build_html(session_id: str) -> str:
+    html = r"""<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -984,6 +1048,22 @@ body {
 
   <!-- 결제 확인 -->
   <div class="screen" id="screen-checkout">
+    <!-- 인사 배너 (목소리 인식 성공 또는 신원 확인 후) -->
+    <div id="checkout-greeting" style="display:none;align-items:center;gap:10px;background:linear-gradient(135deg,#1d4ed8,#2563eb);color:#fff;padding:12px 20px;border-radius:12px;margin-bottom:16px;font-size:1.1rem;font-weight:700;width:100%;">
+      <span style="font-size:1.4rem;">👋</span>
+      <span id="checkout-greeting-text">안녕하세요!</span>
+    </div>
+    <!-- 신원 확인 폼 (목소리 미인식 시) -->
+    <div id="checkout-identify" style="display:none;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:14px 18px;margin-bottom:16px;width:100%;">
+      <div style="font-size:.9rem;font-weight:700;color:#334155;margin-bottom:10px;">어떻게 부르면 될까요? <span style="font-weight:400;color:#94a3b8;font-size:.8rem;">(선택)</span></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <input class="kiosk-input" id="identify-name" type="text" placeholder="이름" autocomplete="off" style="flex:1;min-width:100px;padding:8px 12px;font-size:.9rem;">
+        <input class="kiosk-input" id="identify-phone" type="tel" placeholder="전화번호" autocomplete="off" style="flex:2;min-width:140px;padding:8px 12px;font-size:.9rem;">
+        <button class="btn btn-primary" style="padding:8px 16px;font-size:.85rem;" onclick="submitIdentify()">확인</button>
+        <button class="btn btn-outline" style="padding:8px 12px;font-size:.85rem;" onclick="skipIdentify()">건너뛰기</button>
+      </div>
+      <div id="identify-error" style="color:#b91c1c;font-size:.78rem;margin-top:6px;display:none;"></div>
+    </div>
     <div id="checkout-left">
       <div id="checkout-left-header">대화 내용</div>
       <div id="checkout-convo"></div>
@@ -1155,10 +1235,46 @@ let _lastAiCount    = 0;
 let _ttsAudio       = null;  // 현재 재생 중인 Audio 객체
 let _audioUnlocked  = false; // 브라우저 autoplay 잠금 해제 여부
 
+const SESSION_ID = '__SESSION_ID__';
+
 // 첫 클릭/터치 시 오디오 컨텍스트 잠금 해제
 document.addEventListener('click', function _unlock() {
   _audioUnlocked = true;
-}, { capture: true, once: false });
+  startBrowserMic();  // 첫 클릭 시 마이크 시작
+}, { capture: true, once: true });
+
+// ── 브라우저 마이크 → WebSocket 스트리밍 ──
+let _micStarted = false;
+async function startBrowserMic() {
+  if (_micStarted) return;
+  _micStarted = true;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    // AudioContext를 24kHz로 생성 — 브라우저가 자동으로 리샘플링
+    const ctx = new AudioContext({ sampleRate: 24000 });
+    const source = ctx.createMediaStreamSource(stream);
+    const processor = ctx.createScriptProcessor(2400, 1, 1);  // 100ms 청크
+    const ws = new WebSocket((location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws/audio?sid=' + SESSION_ID);
+    ws.binaryType = 'arraybuffer';
+
+    processor.onaudioprocess = (e) => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      const f32 = e.inputBuffer.getChannelData(0);
+      // float32 → int16 PCM 변환
+      const i16 = new Int16Array(f32.length);
+      for (let i = 0; i < f32.length; i++) {
+        const s = Math.max(-1, Math.min(1, f32[i]));
+        i16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      ws.send(i16.buffer);
+    };
+    source.connect(processor);
+    processor.connect(ctx.destination);
+    console.log('[Mic] 브라우저 마이크 시작 (24kHz)');
+  } catch(e) {
+    console.warn('[Mic] 마이크 접근 실패:', e);
+  }
+}
 
 // ── TTS (OpenAI API) ──
 function toggleTTS() {
@@ -1207,7 +1323,10 @@ function applyState(state) {
   if (state.conversation_log !== undefined) renderChatLog(state.conversation_log);
   updateConvFooter(state);
   renderCart(state.cart_items || [], state.cart_total || 0);
-  if (state.screen === 'checkout') renderCheckoutSummary(state.cart_items || [], state.cart_total || 0);
+  if (state.screen === 'checkout') {
+    renderCheckoutSummary(state.cart_items || [], state.cart_total || 0);
+    updateCheckoutIdentity(state);
+  }
   if (state.screen === 'complete') {
     const nm = state.user_name;
     document.getElementById('complete-title').textContent = nm ? `감사합니다, ${nm}님!` : '주문 완료!';
@@ -1367,7 +1486,11 @@ async function addMenuByClick(name) {
 // ── 액션 ──
 async function post(url, data) {
   try {
-    await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+    await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-Session-Id': SESSION_ID},
+      body: JSON.stringify(data),
+    });
   } catch(e) { console.error(e); }
 }
 
@@ -1377,6 +1500,38 @@ function selectPayment(method)   { post('/action/payment', {method}); }
 function saveVoice(save)         { post('/action/save_voice', {save}); }
 function retryVerification()     { post('/action/retry_verification', {}); }
 function confirmAppPayment(m)    { post('/action/app_payment_confirm', {method: m}); }
+
+function updateCheckoutIdentity(state) {
+  const greetEl  = document.getElementById('checkout-greeting');
+  const identEl  = document.getElementById('checkout-identify');
+  if (!greetEl || !identEl) return;
+  if (state.user_name) {
+    greetEl.style.display = 'flex';
+    document.getElementById('checkout-greeting-text').textContent = `안녕하세요, ${state.user_name}님!`;
+    identEl.style.display = 'none';
+  } else {
+    greetEl.style.display = 'none';
+    identEl.style.display = 'block';
+  }
+}
+
+function submitIdentify() {
+  const name  = document.getElementById('identify-name').value.trim();
+  const phone = document.getElementById('identify-phone').value.trim();
+  const errEl = document.getElementById('identify-error');
+  if (!name)  { errEl.textContent='이름을 입력해주세요.'; errEl.style.display='block'; return; }
+  if (!/^01[0-9]{8,9}$/.test(phone)) {
+    errEl.textContent='올바른 전화번호를 입력해주세요 (예: 01012345678)';
+    errEl.style.display='block'; return;
+  }
+  errEl.style.display='none';
+  post('/action/identify', {name, phone});
+}
+
+function skipIdentify() {
+  const identEl = document.getElementById('checkout-identify');
+  if (identEl) identEl.style.display = 'none';
+}
 
 function resetKiosk() {
   if (!confirm('처음으로 돌아가시겠어요?\n주문 내용이 모두 초기화됩니다.')) return;
@@ -1398,7 +1553,7 @@ function submitRegister() {
 }
 
 // ── SSE ──
-const es = new EventSource('/events');
+const es = new EventSource('/events?sid=' + SESSION_ID);
 es.onmessage = e => applyState(JSON.parse(e.data));
 es.onerror   = () => { /* 자동 재연결 */ };
 
@@ -1407,6 +1562,7 @@ renderMenuGrid('버거');
 </script>
 </body>
 </html>"""
+    return html.replace('__SESSION_ID__', session_id)
 
 
 def _build_app_html() -> str:

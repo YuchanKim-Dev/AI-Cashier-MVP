@@ -48,3 +48,20 @@ def get_first_user() -> dict | None:
     """데모용: 가장 마지막으로 등록한 사용자 반환."""
     users = _load()
     return users[-1] if users else None
+
+
+def find_user_by_phone(phone: str) -> dict | None:
+    for u in _load():
+        if u.get("phone") == phone:
+            return u
+    return None
+
+
+def update_user_preferences(name: str, preferences: str):
+    """이름으로 사용자를 찾아 취향 요약 업데이트."""
+    users = _load()
+    for u in users:
+        if u.get("name") == name:
+            u["preferences"] = preferences
+            _save(users)
+            return
