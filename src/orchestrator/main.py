@@ -201,8 +201,8 @@ async def run():
                 session.is_new_user   = False
                 session.speaker_verified = True
                 print(f"[Speaker] 인식됨: {match['name']}")
-                # AI 지시사항 업데이트 → 다음 응답부터 이름으로 인사
-                await client.update_instructions(match["name"])
+                # 인사 보장: 응답 중이면 지시사항만, 유휴면 즉시 인사 생성
+                await client.greet_returning_user(match["name"])
                 push_state(session.to_dict())
             else:
                 print("[Speaker] 등록된 사용자 없음 / 유사도 낮음")
@@ -333,7 +333,7 @@ async def run():
     mic.start()
     print("[Orchestrator] 마이크 시작. http://localhost:8000 에서 화면을 확인하세요.")
 
-    _MUTE_SCREENS = {"payment_processing", "register", "complete",
+    _MUTE_SCREENS = {"checkout", "payment_processing", "register", "complete",
                       "voice_save_prompt", "card_insert", "app_payment"}
 
     async def mic_to_realtime():

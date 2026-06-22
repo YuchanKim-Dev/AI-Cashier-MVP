@@ -545,15 +545,9 @@ body {
   border-radius: 12px 2px 12px 12px;
 }
 
-/* 푸터 */
+/* 푸터 — 실시간 텍스트 표시 영역 숨김 (채팅 버블만 표시) */
 #conv-footer {
-  border-top: 1px solid var(--border);
-  padding: 11px 16px;
-  min-height: 50px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  background: var(--bg2);
+  display: none;
 }
 #conv-footer-icon {
   width: 28px; height: 28px;
@@ -1159,6 +1153,12 @@ let ttsEnabled      = true;
 let _lastLogLen     = 0;
 let _lastAiCount    = 0;
 let _ttsAudio       = null;  // 현재 재생 중인 Audio 객체
+let _audioUnlocked  = false; // 브라우저 autoplay 잠금 해제 여부
+
+// 첫 클릭/터치 시 오디오 컨텍스트 잠금 해제
+document.addEventListener('click', function _unlock() {
+  _audioUnlocked = true;
+}, { capture: true, once: false });
 
 // ── TTS (OpenAI API) ──
 function toggleTTS() {
@@ -1179,7 +1179,7 @@ function toggleTTS() {
 }
 
 async function speakText(text) {
-  if (!ttsEnabled || !text) return;
+  if (!ttsEnabled || !text || !_audioUnlocked) return;
   try {
     if (_ttsAudio) { _ttsAudio.pause(); _ttsAudio = null; }
     const url = '/tts?text=' + encodeURIComponent(text);

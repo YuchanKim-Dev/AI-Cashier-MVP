@@ -59,6 +59,7 @@ class RealtimeClient:
         self._ws = None
         self._connected = False
         self._queued_fn_outputs: list[tuple[str, str]] = []   # (call_id, output_json)
+        self._response_active = False   # 현재 응답 생성 중 여부
 
     async def connect(self):
         url = f"{REALTIME_URL}?model={self.model}"
@@ -93,9 +94,9 @@ class RealtimeClient:
                         "format": _FMT_INPUT,
                         "turn_detection": {
                             "type": "server_vad",
-                            "threshold": 0.5,
+                            "threshold": 0.7,        # 0.5→0.7: 주변 소음 필터링 강화
                             "prefix_padding_ms": 300,
-                            "silence_duration_ms": 600,
+                            "silence_duration_ms": 800,  # 600→800: 짧은 침묵에 오발화 방지
                         },
                         "transcription": {"model": "whisper-1"},
                     },
@@ -170,8 +171,13 @@ class RealtimeClient:
             if self.on_function_call:
                 await self.on_function_call(call_id, name, arguments)
 
+        # ── 응답 시작
+        elif t == "response.created":
+            self._response_active = True
+
         # ── 응답 완료
         elif t == "response.done":
+            self._response_active = False
             if self._queued_fn_outputs:
                 # function call 결과들이 쌓여 있으면 → 한번만 response.create
                 self._queued_fn_outputs.clear()
@@ -219,12 +225,29 @@ class RealtimeClient:
             "- 장바구니가 비어있으면 checkout을 호출하지 마세요.\n"
             "- 응답은 2문장 이내로 짧게. 불필요한 인사말 반복 금지.\n"
             "- 가격은 항상 '원' 단위로 말하세요.\n"
-            f"- 이 손님은 목소리로 인식된 '{name}'님입니다. 처음 한 번만 자연스럽게 이름으로 반갑게 인사하세요."
+            f"- 이 손님은 목소리로 인식된 '{name}'님입니다. 지금 바로 '{name}님, 어서오세요!' 형태로 이름을 불러 인사하세요."
         )
         await self._send({
             "type": "session.update",
             "session": {"type": "realtime", "instructions": system_prompt},
         })
+
+    async def greet_returning_user(self, name: str):
+        """화자 인식 완료 후 이름 인사를 보장하는 메서드.
+        현재 응답 중이면 지시사항만 업데이트; 유휴 상태면 즉시 인사 응답 생성.
+        """
+        await self.update_instructions(name)
+        if not self._response_active:
+            # AI가 현재 응답 중이 아닐 때만 즉시 인사 트리거
+            await self._send({
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "(목소리 인식 완료)"}],
+                },
+            })
+            await self._send({"type": "response.create"})
 
     async def close(self):
         self._connected = False
