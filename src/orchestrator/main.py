@@ -54,7 +54,7 @@ load_dotenv()
 
 
 async def _start_frontend_server():
-    config = uvicorn.Config(fastapi_app, host="0.0.0.0", port=8000, log_level="warning")
+    config = uvicorn.Config(fastapi_app, host="0.0.0.0", port=8000, log_level="error")
     server = uvicorn.Server(config)
     await server.serve()
 
@@ -422,7 +422,6 @@ def main():
 
     async def _run_all():
         asyncio.create_task(preload_model())
-        # uvicorn과 오케스트레이터를 같은 이벤트 루프에서 실행 — 큐 공유 안전
         await asyncio.gather(
             _start_frontend_server(),
             run(),
@@ -431,6 +430,8 @@ def main():
     try:
         asyncio.run(_run_all())
     except KeyboardInterrupt:
+        pass
+    finally:
         print("\n[Orchestrator] 종료합니다.")
 
 
