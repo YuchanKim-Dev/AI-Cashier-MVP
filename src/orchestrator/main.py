@@ -94,7 +94,15 @@ async def run_session(session_id: str):
     async def on_checkout_fn():
         await action_queue.put({"type": "checkout"})
 
-    fn_handler = FunctionCallHandler(cart=cart, session=session, on_checkout=on_checkout_fn)
+    async def on_select_payment_fn(method: str):
+        await action_queue.put({"type": "payment", "method": method})
+
+    fn_handler = FunctionCallHandler(
+        cart=cart,
+        session=session,
+        on_checkout=on_checkout_fn,
+        on_select_payment=on_select_payment_fn,
+    )
 
     def on_audio_delta(b64: str):
         pass
@@ -156,10 +164,18 @@ async def run_session(session_id: str):
             print(f"[{sid}] 오디오 불충분 — 화자인식 건너뜀")
             return
         try:
+            all_users = get_all_users()
+            users_with_embedding = [u for u in all_users if u.get("embedding")]
+            if not users_with_embedding:
+                # 등록된 목소리 없음 → 불일치가 아니라 그냥 미확인 상태 유지
+                print(f"[{sid}] 등록된 목소리 없음 — 화자인식 건너뜀")
+                session.speaker_verified = None
+                push_session_state(session_id, session.to_dict())
+                return
             emb = await extract_embedding(audio_data, sample_rate=24000)
             if emb is None:
                 return
-            match = find_user(emb, get_all_users())
+            match = find_user(emb, users_with_embedding)
             if match:
                 session.user_name        = match["name"]
                 session.is_new_user      = False
@@ -168,7 +184,7 @@ async def run_session(session_id: str):
                 await client.greet_returning_user(match["name"])
                 push_session_state(session_id, session.to_dict())
             else:
-                print(f"[{sid}] 등록 사용자 없음 / 유사도 낮음")
+                print(f"[{sid}] 유사도 낮음 — 불일치")
                 session.speaker_verified = False
                 push_session_state(session_id, session.to_dict())
         except Exception as e:
@@ -355,7 +371,8 @@ async def run_session(session_id: str):
 
     print(f"[{sid}] 세션 시작. 브라우저 마이크 대기 중.")
 
-    _MUTE_SCREENS = {"checkout", "payment_processing", "register", "complete",
+    # checkout 화면에서도 마이크 유지 — 결제 수단 음성 선택 가능
+    _MUTE_SCREENS = {"payment_processing", "register", "complete",
                       "voice_save_prompt", "card_insert", "app_payment"}
 
     async def mic_to_realtime():

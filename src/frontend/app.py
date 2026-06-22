@@ -1397,8 +1397,8 @@ function updateHeader(state) {
   const spkDot = document.getElementById('spk-dot');
   const spkTxt = document.getElementById('spk-text');
   if (state.speaker_verified === true)    { spkDot.className='dot dot-ok';   spkTxt.textContent='인증됨'; }
-  else if (state.speaker_verified===false){ spkDot.className='dot dot-fail'; spkTxt.textContent='불일치'; }
-  else                                    { spkDot.className='dot dot-pending'; spkTxt.textContent='인식 중'; }
+  else if (state.speaker_verified===false){ spkDot.className='dot dot-fail'; spkTxt.textContent='미일치'; }
+  else                                    { spkDot.className='dot dot-idle';  spkTxt.textContent='화자인식'; }
 }
 
 // ── 대화 풋터 ──

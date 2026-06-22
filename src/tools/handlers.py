@@ -66,6 +66,22 @@ TOOLS = [
         "description": "결제를 시작합니다. 손님이 주문을 끝내고 결제하겠다고 할 때 호출합니다. 장바구니가 비어있으면 호출하지 마세요.",
         "parameters": {"type": "object", "properties": {}},
     },
+    {
+        "type": "function",
+        "name": "select_payment",
+        "description": "결제 화면에서 손님이 결제 수단을 말할 때 호출합니다. 앱카드/현장카드 중 선택.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "method": {
+                    "type": "string",
+                    "enum": ["app_card", "physical_card"],
+                    "description": "앱카드(app_card) 또는 현장카드(physical_card)",
+                }
+            },
+            "required": ["method"],
+        },
+    },
 ]
 
 
@@ -80,11 +96,12 @@ class FunctionCallHandler:
         cart: CartManager,
         session: SessionState,
         on_checkout: Callable[[], Awaitable[None]],
+        on_select_payment: Callable[[str], Awaitable[None]] = None,
     ):
         self.cart = cart
         self.session = session
-        # checkout은 결제 화면 전환이 필요해서 orchestrator 콜백으로 처리
         self.on_checkout = on_checkout
+        self.on_select_payment = on_select_payment
 
     async def handle(self, call_id: str, name: str, arguments_json: str) -> str:
         """
@@ -124,9 +141,19 @@ class FunctionCallHandler:
             if self.cart.is_empty:
                 result = {"success": False, "error": "장바구니가 비어있습니다."}
             else:
-                result = {"success": True, "message": "결제 화면으로 이동합니다.", "cart": self.cart.view()}
-                # 결제 화면 전환은 orchestrator 콜백에서 처리
+                result = {
+                    "success": True,
+                    "message": "결제 화면으로 이동합니다. 앱카드 또는 현장카드로 결제 가능합니다. 어떻게 결제하시겠어요?",
+                    "cart": self.cart.view(),
+                }
                 await self.on_checkout()
+
+        elif name == "select_payment":
+            method = args.get("method", "physical_card")
+            label = "앱카드" if method == "app_card" else "현장카드"
+            result = {"success": True, "message": f"{label} 결제를 진행합니다."}
+            if self.on_select_payment:
+                await self.on_select_payment(method)
 
         else:
             result = {"error": f"알 수 없는 함수: {name}"}
