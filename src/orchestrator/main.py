@@ -20,6 +20,7 @@
 import asyncio
 import base64
 import os
+import re as _re
 import ssl
 import time
 
@@ -41,7 +42,7 @@ from src.frontend.app import (
 )
 from src.orchestrator.session import SessionState
 from src.realtime.client import RealtimeClient
-from src.audio.speaker_verify import preload_model, extract_embedding, find_user
+from src.audio.speaker_verify import preload_model, extract_embedding, find_user, cosine_sim
 from src.tools.cart import CartManager
 from src.tools.handlers import FunctionCallHandler
 from src.tools.payment import payment_gateway
@@ -53,9 +54,10 @@ from src.tools.user_store import (
 load_dotenv()
 
 
-async def _start_frontend_server():
-    config = uvicorn.Config(fastapi_app, host="0.0.0.0", port=8000, log_level="error")
+async def _start_frontend_server(server_holder: list):
+    config = uvicorn.Config(fastapi_app, host="0.0.0.0", port=8000, log_level="critical")
     server = uvicorn.Server(config)
+    server_holder.append(server)
     await server.serve()
 
 
@@ -83,13 +85,18 @@ async def run_session(session_id: str):
         print(f"[{sid}] OPENAI_API_KEY 없음")
         return
 
-    _pending_ai: str = ""
-    _pending_user: str = ""
     _voice_buffer: bytearray = bytearray()
     _MAX_BUFFER   = 24000 * 2 * 6
     _is_listening = False
     _verification_done = False
-    _ai_speaking = False  # AI 오디오 재생 중 → 마이크 뮤트
+    _ai_speaking = False          # AI 오디오 재생 중 → 마이크 뮤트
+    _ai_audio_bytes = 0           # 현재 응답에서 전송한 오디오 바이트 수
+    _mic_reenable_scheduled = False  # 이중 스케줄 방지
+    _detected_language: str | None = None  # "ko" | "en" — 첫 발화로 결정
+    _check_buffer = bytearray()   # 중간 화자 확인용 rolling buffer
+    _verified_embedding: list | None = None  # 인증된 사용자의 임베딩
+    _last_mid_check = 0.0         # 마지막 중간 화자 확인 시각
+    _utterance_count = 0          # 이번 세션 발화 횟수
     voice = os.getenv("OPENAI_REALTIME_VOICE", "shimmer")
     model = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2")
     loop  = asyncio.get_event_loop()
@@ -108,71 +115,118 @@ async def run_session(session_id: str):
     )
 
     def on_audio_delta(b64: str):
-        nonlocal _ai_speaking
+        nonlocal _ai_speaking, _ai_audio_bytes, _mic_reenable_scheduled
         _ai_speaking = True
-        push_audio_out(session_id, base64.b64decode(b64))
+        _mic_reenable_scheduled = False  # 새 응답 시작 시 플래그 초기화
+        pcm = base64.b64decode(b64)
+        _ai_audio_bytes += len(pcm)
+        push_audio_out(session_id, pcm)
 
     def on_text_delta(delta: str):
         session.ai_text += delta
+        push_session_state(session_id, session.to_dict())
+
+    def on_ai_transcript_done(transcript: str):
+        """AI 발화 전사 완료 — 즉시 로그에 추가."""
+        # 너무 짧은 전사(중단된 응답) 무시
+        if len(transcript) < 4:
+            return
+        session.ai_text = transcript
+        session.conversation_log.append({"role": "ai", "text": transcript})
+        print(f"[{sid}] AI 로그 추가: {transcript[:60]!r}")
         push_session_state(session_id, session.to_dict())
 
     def on_user_text_delta(delta: str):
         session.user_text = (session.user_text or "") + delta
         push_session_state(session_id, session.to_dict())
 
+    def _is_noise(text: str) -> bool:
+        """에코/배경소음 필터.
+        - 한국어 감지 → 정상 입력
+        - 영어이고 _detected_language != 'ko' → 실제 영어 발화로 허용
+        - 그 외 → 에코/소음으로 무시
+        """
+        t = text.strip()
+        if len(t) < 2:
+            return True
+        has_korean = any('가' <= c <= '힣' or 'ㄱ' <= c <= 'ㅎ' for c in t)
+        if has_korean:
+            return False
+        # 한글 없음 — 영어 여부 판단
+        eng_words = _re.findall(r'[a-zA-Z]{2,}', t)
+        is_substantial = len(eng_words) >= 2 or (len(eng_words) == 1 and len(eng_words[0]) >= 5 and len(t) >= 8)
+        if is_substantial and _detected_language != "ko":
+            return False  # 영어 모드 or 아직 미결정 → 실제 영어 입력으로 처리
+        print(f"[{sid}] 비한국어 전사 무시 (에코/소음): {t[:40]!r}")
+        return True
+
     def on_user_text(text: str):
-        nonlocal _pending_ai, _pending_user
+        nonlocal _detected_language, _utterance_count, _last_mid_check
+        if _is_noise(text):
+            return
+        has_korean = any('가' <= c <= '힣' or 'ㄱ' <= c <= 'ㅎ' for c in text)
+        # 첫 발화로 언어 결정
+        if _detected_language is None:
+            _detected_language = "ko" if has_korean else "en"
+            if _detected_language == "en":
+                print(f"[{sid}] 영어 감지 → 영어 모드로 전환")
+                loop.create_task(client.set_language("en"))
+        # 한국어 모드인데 비한국어가 오면 에코/소음
+        elif _detected_language == "ko" and not has_korean:
+            print(f"[{sid}] 한국어 모드 영어 무시: {text[:40]!r}")
+            return
+        _utterance_count += 1
         session.user_text = text
-        if _pending_ai:
-            session.conversation_log.append({"role": "user", "text": text})
-            session.conversation_log.append({"role": "ai",   "text": _pending_ai})
-            _pending_ai = ""
-        else:
-            _pending_user = text
+        session.conversation_log.append({"role": "user", "text": text})
+        print(f"[{sid}] 사용자 로그 추가: {text[:60]!r}")
         push_session_state(session_id, session.to_dict())
+        # 중간 화자 확인 (30초에 한 번, 3초 이상 오디오 있을 때)
+        now = time.time()
+        if (session.speaker_verified is True and _verified_embedding
+                and len(_check_buffer) >= 72000
+                and (now - _last_mid_check) > 30.0):
+            _last_mid_check = now
+            loop.create_task(_check_speaker_mid())
 
     def on_response_done():
-        nonlocal _pending_ai, _pending_user
-        ai_text = session.ai_text.strip()
-        session.ai_text = ""
+        # 로그 처리는 on_ai_transcript_done에서 이미 완료
+        # 만약 transcript_done 이벤트가 안 왔다면 여기서 fallback 처리
         session.conversation = "idle"
-        if ai_text:
-            if _pending_user:
-                session.conversation_log.append({"role": "user", "text": _pending_user})
-                session.conversation_log.append({"role": "ai",   "text": ai_text})
-                _pending_user = ""
-            else:
-                _pending_ai = ai_text
+        leftover = session.ai_text.strip()
+        session.ai_text = ""
+        if leftover:
+            # transcript_done 없이 response.done이 먼저 온 경우 fallback
+            already = any(
+                m["role"] == "ai" and m["text"] == leftover
+                for m in session.conversation_log[-3:]
+            )
+            if not already:
+                session.conversation_log.append({"role": "ai", "text": leftover})
+                print(f"[{sid}] AI 로그 fallback: {leftover[:60]!r}")
         push_session_state(session_id, session.to_dict())
 
     def on_session_ready():
         nonlocal _verification_done, _voice_buffer, _is_listening
         print(f"[{sid}] Realtime 준비 완료.")
-        has_registered = bool(get_all_users())
-        if has_registered:
-            greeting = "안녕하세요! 목소리를 확인하는 중입니다. 말씀해 주세요."
-        else:
-            greeting = "안녕하세요! 주문을 도와드릴게요. 무엇을 드시겠어요?"
         _verification_done = False
         _voice_buffer = bytearray()
         _is_listening  = False
-        session.conversation_log = [{"role": "ai", "text": greeting}]
+        session.conversation_log = []
         _push({"mic": "active", "screen": "waiting"})
 
     async def _run_speaker_verify():
-        nonlocal _verification_done
+        nonlocal _verification_done, _verified_embedding
         if _verification_done:
             return
         _verification_done = True
         audio_data = bytes(_voice_buffer)
-        if len(audio_data) < 48_000:
-            print(f"[{sid}] 오디오 불충분 — 화자인식 건너뜀")
+        if len(audio_data) < 72_000:  # 최소 3초
+            print(f"[{sid}] 오디오 불충분({len(audio_data)/48000:.1f}s) — 화자인식 건너뜀")
             return
         try:
             all_users = get_all_users()
             users_with_embedding = [u for u in all_users if u.get("embedding")]
             if not users_with_embedding:
-                # 등록된 목소리 없음 → 불일치가 아니라 그냥 미확인 상태 유지
                 print(f"[{sid}] 등록된 목소리 없음 — 화자인식 건너뜀")
                 session.speaker_verified = None
                 push_session_state(session_id, session.to_dict())
@@ -182,6 +236,7 @@ async def run_session(session_id: str):
                 return
             match = find_user(emb, users_with_embedding)
             if match:
+                _verified_embedding = emb  # 중간 비교용 저장
                 session.user_name        = match["name"]
                 session.is_new_user      = False
                 session.speaker_verified = True
@@ -195,10 +250,38 @@ async def run_session(session_id: str):
         except Exception as e:
             print(f"[{sid}] 화자인식 오류: {e}")
 
+    async def _check_speaker_mid():
+        """중간 화자 변경 감지 — 등록된 사람과 크게 다른 목소리 감지 시 경고."""
+        nonlocal _check_buffer
+        audio = bytes(_check_buffer)
+        _check_buffer = bytearray()
+        if not audio or not _verified_embedding:
+            return
+        try:
+            emb = await extract_embedding(audio, sample_rate=24000)
+            if emb is None:
+                return
+            sim = cosine_sim(emb, _verified_embedding)
+            print(f"[{sid}] 중간 화자 확인: 유사도 {sim:.3f}")
+            if sim < 0.28:
+                print(f"[{sid}] 다른 목소리 감지!")
+                await client._send({
+                    "type": "response.create",
+                    "response": {
+                        "instructions": (
+                            "잠깐만요, 처음에 주문 시작하셨던 분이 직접 말씀해 주시겠어요? "
+                            "보안을 위해 확인이 필요합니다."
+                        )
+                    }
+                })
+        except Exception as e:
+            print(f"[{sid}] 중간 화자 확인 오류: {e}")
+
     def on_status_update(status: str, ts: float):
-        nonlocal _is_listening
+        nonlocal _is_listening, _check_buffer
         if status == "listening":
             _is_listening = True
+            _check_buffer = bytearray()  # 이번 발화 시작 시 초기화
             session.ai_text = ""
             session.user_text = ""  # 새 발화 시작 — 실시간 자막 초기화
             session.on_speech_start(ts)
@@ -211,15 +294,27 @@ async def run_session(session_id: str):
             session.conversation = "processing"
             if not _verification_done and len(_voice_buffer) >= 48_000:
                 loop.create_task(_run_speaker_verify())
-        elif status in ("idle", "speaking_done"):
+        elif status == "speaking_done":
+            # 오디오 전송 완료 → 실제 재생 시간만큼 마이크 뮤트 유지
+            nonlocal _mic_reenable_scheduled
             _is_listening = False
             session.conversation = "idle"
-            # 브라우저 오디오 버퍼 소진 후 마이크 재활성 (500ms 여유)
-            async def _reenable_mic():
-                nonlocal _ai_speaking
-                await asyncio.sleep(0.05)
-                _ai_speaking = False
-            loop.create_task(_reenable_mic())
+            if not _mic_reenable_scheduled:
+                _mic_reenable_scheduled = True
+                audio_duration = _ai_audio_bytes / (2 * 24000) / 1.35  # 1.35배속 반영
+                mute_delay = max(audio_duration + 0.5, 0.8)
+                print(f"[{sid}] 마이크 재활성 대기: {mute_delay:.2f}s (오디오 {audio_duration:.2f}s)")
+                async def _reenable_mic(delay=mute_delay):
+                    nonlocal _ai_speaking, _ai_audio_bytes, _mic_reenable_scheduled
+                    await asyncio.sleep(delay)
+                    _ai_audio_bytes = 0
+                    _ai_speaking = False
+                    _mic_reenable_scheduled = False
+                    print(f"[{sid}] 마이크 재활성")
+                loop.create_task(_reenable_mic())
+        elif status == "idle":
+            _is_listening = False
+            session.conversation = "idle"
         push_session_state(session_id, session.to_dict())
 
     async def on_function_call(call_id: str, name: str, arguments: str):
@@ -281,21 +376,34 @@ async def run_session(session_id: str):
         await _do_payment()
 
     async def action_handler():
-        nonlocal _pending_ai, _pending_user
         while True:
             action = await action_queue.get()
             atype = action.get("type")
 
             if atype == "reset":
-                _pending_ai = ""
-                _pending_user = ""
                 session.__init__()
                 cart.clear()
-                session.conversation_log = []
                 push_session_state(session_id, session.to_dict())
 
             elif atype == "start":
+                nonlocal _verification_done, _voice_buffer, _detected_language
+                nonlocal _verified_embedding, _utterance_count, _last_mid_check
+                nonlocal _ai_speaking, _ai_audio_bytes, _mic_reenable_scheduled
+                # 매 대화마다 상태 초기화
+                _verification_done = False
+                _voice_buffer = bytearray()
+                _check_buffer.clear()
+                _detected_language = None
+                _verified_embedding = None
+                _utterance_count = 0
+                _last_mid_check = 0.0
+                _ai_speaking = False
+                _ai_audio_bytes = 0
+                _mic_reenable_scheduled = False
+                session.speaker_verified = None
+                session.conversation_log = []
                 _push({"screen": "ordering"})
+                loop.create_task(client.send_initial_greeting())
 
             elif atype == "checkout":
                 if cart.is_empty:
@@ -371,6 +479,7 @@ async def run_session(session_id: str):
         voice=voice,
         on_audio_delta=on_audio_delta,
         on_text_delta=on_text_delta,
+        on_ai_transcript_done=on_ai_transcript_done,
         on_user_text=on_user_text,
         on_user_text_delta=on_user_text_delta,
         on_response_done=on_response_done,
@@ -397,9 +506,13 @@ async def run_session(session_id: str):
             chunk = await audio_queue.get()
             if session.screen in _MUTE_SCREENS:
                 continue
-            # 화자인증 버퍼는 AI 말하는 중에도 채움 (사용자 마이크 데이터만 들어옴)
-            if not _verification_done and len(_voice_buffer) < _MAX_BUFFER:
-                _voice_buffer.extend(chunk)
+            # 화자인증 버퍼: AI 말하는 중 제외
+            if not _ai_speaking:
+                if not _verification_done and len(_voice_buffer) < _MAX_BUFFER:
+                    _voice_buffer.extend(chunk)
+                # 중간 화자 확인용 버퍼 (발화 중에만)
+                if _is_listening and len(_check_buffer) < _MAX_BUFFER:
+                    _check_buffer.extend(chunk)
             if _ai_speaking:
                 continue  # Realtime API 전송만 막음 — echo loop 방지
             await client.send_audio_chunk(chunk)
@@ -432,15 +545,38 @@ def main():
     print("[Orchestrator] 키오스크 화면: http://localhost:8000")
 
     async def _run_all():
+        import signal
+        import sys
+        loop = asyncio.get_event_loop()
+        stop_event = asyncio.Event()
+        server_holder: list = []
+
+        def _handle_sigint():
+            if stop_event.is_set():
+                # 두 번째 Ctrl+C → 즉시 강제 종료
+                print("\n[Orchestrator] 강제 종료합니다.")
+                os._exit(0)
+            stop_event.set()
+            print("\n[Orchestrator] 종료 중... (한 번 더 누르면 강제 종료)")
+
+        loop.add_signal_handler(signal.SIGINT,  _handle_sigint)
+        loop.add_signal_handler(signal.SIGTERM, _handle_sigint)
+
         asyncio.create_task(preload_model())
-        await asyncio.gather(
-            _start_frontend_server(),
-            run(),
-        )
+        server_task = asyncio.create_task(_start_frontend_server(server_holder))
+        run_task    = asyncio.create_task(run())
+
+        await stop_event.wait()
+
+        # uvicorn graceful 종료 (should_exit → 에러 없이 종료)
+        if server_holder:
+            server_holder[0].should_exit = True
+        run_task.cancel()
+        await asyncio.gather(server_task, run_task, return_exceptions=True)
 
     try:
         asyncio.run(_run_all())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         pass
     finally:
         print("\n[Orchestrator] 종료합니다.")

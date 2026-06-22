@@ -40,6 +40,7 @@ class RealtimeClient:
         voice: str = "alloy",
         on_audio_delta: Optional[Callable[[str], None]] = None,
         on_text_delta: Optional[Callable[[str], None]] = None,
+        on_ai_transcript_done: Optional[Callable[[str], None]] = None,
         on_user_text: Optional[Callable[[str], None]] = None,
         on_user_text_delta: Optional[Callable[[str], None]] = None,
         on_response_done: Optional[Callable[[], None]] = None,
@@ -52,6 +53,7 @@ class RealtimeClient:
         self.voice = voice
         self.on_audio_delta = on_audio_delta
         self.on_text_delta = on_text_delta
+        self.on_ai_transcript_done = on_ai_transcript_done  # AI 발화 완료 (전체 텍스트)
         self.on_user_text = on_user_text
         self.on_user_text_delta = on_user_text_delta
         self.on_response_done = on_response_done
@@ -62,6 +64,8 @@ class RealtimeClient:
         self._connected = False
         self._queued_fn_outputs: list[tuple[str, str]] = []   # (call_id, output_json)
         self._response_active = False   # 현재 응답 생성 중 여부
+        self._transcript_sent = False   # 이번 응답에서 transcript 콜백 이미 호출됨
+        self._lang = "ko"              # 현재 언어 ("ko" | "en")
 
     async def connect(self):
         url = f"{REALTIME_URL}?model={self.model}"
@@ -76,19 +80,7 @@ class RealtimeClient:
         await self._send_session_update()
 
     async def _send_session_update(self):
-        system_prompt = (
-            "You are a voice AI cashier. Your ONLY job: help customers order food.\n"
-            "LANGUAGE: detect the customer's first utterance language and NEVER switch. Korean→Korean only. English→English only.\n"
-            "RULES:\n"
-            "- Call add_to_cart immediately when a menu item is mentioned. No confirmation.\n"
-            "- Call remove_from_cart immediately when removal is requested.\n"
-            "- Call recommend_menu only when customer asks what to order.\n"
-            "- Call checkout when customer is done ordering. Never if cart is empty.\n"
-            "- On checkout screen: call select_payment('app_card') or select_payment('physical_card') based on what customer says.\n"
-            "- If customer asks anything unrelated to food ordering, say only: '주문을 도와드릴게요.' (Korean) or 'I can only help with your order.' (English)\n"
-            "- MAX 1 short sentence per response. No filler. No repeated greetings.\n"
-            "- Speak fast and energetically."
-        )
+        system_prompt = self._make_prompt("ko")
         event = {
             "type": "session.update",
             "session": {
@@ -100,9 +92,9 @@ class RealtimeClient:
                         "format": _FMT_INPUT,
                         "turn_detection": {
                             "type": "server_vad",
-                            "threshold": 0.5,
-                            "prefix_padding_ms": 200,
-                            "silence_duration_ms": 500,
+                            "threshold": 0.8,
+                            "prefix_padding_ms": 300,
+                            "silence_duration_ms": 700,
                         },
                         "transcription": {"model": "whisper-1"},
                     },
@@ -162,11 +154,23 @@ class RealtimeClient:
             if delta and self.on_audio_delta:
                 self.on_audio_delta(delta)
 
-        # ── 텍스트 델타 (GA: response.output_text.delta, Beta: response.audio_transcript.delta)
-        elif t in ("response.output_text.delta", "response.audio_transcript.delta"):
+        # ── 텍스트 델타 (GA 실제 이벤트명 확인됨)
+        elif t in ("response.output_audio_transcript.delta",
+                   "response.output_text.delta",
+                   "response.audio_transcript.delta"):
             delta = event.get("delta", "")
             if delta and self.on_text_delta:
                 self.on_text_delta(delta)
+
+        # ── AI 발화 전사 완료 (GA 실제 이벤트명 확인됨)
+        elif t in ("response.output_audio_transcript.done",
+                   "response.audio_transcript.done",
+                   "response.output_text.done"):
+            transcript = (event.get("transcript") or event.get("text") or "").strip()
+            print(f"[RealtimeClient] AI 전사 완료: {transcript[:60]!r}")
+            if transcript and self.on_ai_transcript_done and not self._transcript_sent:
+                self._transcript_sent = True
+                self.on_ai_transcript_done(transcript)
 
         # ── function call
         elif t == "response.function_call_arguments.done":
@@ -180,10 +184,24 @@ class RealtimeClient:
         # ── 응답 시작
         elif t == "response.created":
             self._response_active = True
+            self._transcript_sent = False
 
         # ── 응답 완료
         elif t == "response.done":
             self._response_active = False
+            # response.done 안에 output items의 transcript가 포함됨 → fallback (중복 방지)
+            if not self._transcript_sent and self.on_ai_transcript_done:
+                response_obj = event.get("response", {})
+                for item in response_obj.get("output", []):
+                    for part in item.get("content", []):
+                        transcript = (part.get("transcript") or part.get("text") or "").strip()
+                        if transcript:
+                            print(f"[RealtimeClient] response.done fallback transcript: {transcript[:60]!r}")
+                            self._transcript_sent = True
+                            self.on_ai_transcript_done(transcript)
+                            break
+                    if self._transcript_sent:
+                        break
             if self._queued_fn_outputs:
                 # function call 결과들이 쌓여 있으면 → 한번만 response.create
                 self._queued_fn_outputs.clear()
@@ -212,14 +230,9 @@ class RealtimeClient:
         # ── 사용자 발화 전사 완료
         elif t == "conversation.item.input_audio_transcription.completed":
             transcript = event.get("transcript", "").strip()
+            print(f"[RealtimeClient] 사용자 전사 완료: {transcript[:60]!r}")
             if transcript and self.on_user_text:
                 self.on_user_text(transcript)
-
-        # ── AI 발화 전사 완료 (audio 모달리티 → 채팅 로그용)
-        elif t == "response.audio_transcript.done":
-            transcript = event.get("transcript", "").strip()
-            if transcript and self.on_text_delta:
-                self.on_text_delta(transcript)
 
         # ── 오디오 출력 완료 (GA/Beta 호환)
         elif t in ("response.output_audio.done", "response.audio.done"):
@@ -233,30 +246,100 @@ class RealtimeClient:
             if code == "unknown_parameter":
                 print(f"[RealtimeClient] 미지원 파라미터 무시: {err.get('param')}")
 
+        elif not t.startswith("rate_limit") and t not in (
+            "session.created", "session.updated",
+            "response.created", "response.done",
+            "response.output_item.added", "response.output_item.done",
+            "response.content_part.added", "response.content_part.done",
+            "response.function_call_arguments.delta",
+            "input_audio_buffer.committed", "input_audio_buffer.cleared",
+            "conversation.item.created", "conversation.item.truncated",
+            "conversation.item.added", "conversation.item.done",
+        ):
+            print(f"[RealtimeClient] 미처리 이벤트: {t}")
+
+    def _make_prompt(self, lang: str = "ko", user_name: str = None) -> str:
+        """언어 및 사용자 이름에 맞는 시스템 프롬프트 생성."""
+        if lang == "en":
+            prompt = (
+                "You are 'Kay', a warm and friendly AI cashier at a burger restaurant. "
+                "Talk exactly like a real human employee — natural, upbeat, casual but polite. "
+                "No robotic phrases. Respond ONLY in English.\n"
+                "Rules:\n"
+                "- Call add_to_cart immediately when customer mentions any menu item (no confirmation needed)\n"
+                "- Call remove_from_cart when customer wants to remove something\n"
+                "- Call recommend_menu only when asked for suggestions\n"
+                "- Call checkout when order is complete (never if cart is empty)\n"
+                "- At payment screen: call select_payment when customer mentions 'app card' or 'card'\n"
+                "- Keep answers SHORT and NATURAL. Max 1–2 sentences.\n"
+                "- Example: 'Got it! One cheeseburger added. Anything else?' or 'Sure thing!'\n"
+                "- Do NOT repeat greetings. Don't say 'How can I assist you today?' every time."
+            )
+        else:
+            prompt = (
+                "너는 햄버거 가게에서 일하는 직원 'Kay'야. "
+                "진짜 사람 직원처럼 자연스럽고 활기차게 말해. 로봇 말투 절대 금지. 반드시 한국어만 써. 영어 금지.\n"
+                "규칙:\n"
+                "- 메뉴 이름 나오면 바로 add_to_cart 호출. 확인 질문 없이.\n"
+                "- 취소 요청하면 바로 remove_from_cart 호출.\n"
+                "- 추천은 고객이 물어볼 때만 recommend_menu 호출.\n"
+                "- 주문 끝나면 checkout 호출. 장바구니 비면 절대 호출 금지.\n"
+                "- 결제 화면: 앱카드/현장카드 말하면 select_payment 호출.\n"
+                "- 답은 짧고 친근하게. 1~2문장 이내.\n"
+                "- 예시: '네! 치즈버거 담았어요~ 더 드릴까요?', '물론이죠!', '맛있게 드세요!'\n"
+                "- 인사말 반복 금지. 주문 외 질문은 '주문 관련해서만 도와드릴 수 있어요~'로 대응."
+            )
+        if user_name:
+            if lang == "en":
+                prompt += f"\n- This customer is {user_name}. Greet them warmly by name once at the start."
+            else:
+                prompt += f"\n- 이 고객은 '{user_name}'님이야. 처음 한 번만 이름 부르며 반갑게 인사해."
+        return prompt
+
     async def update_instructions(self, name: str):
         """화자 인식 후 AI에게 사용자 이름 알림."""
-        system_prompt = (
-            "You are a voice AI cashier. Your ONLY job: help customers order food.\n"
-            "LANGUAGE: detect the customer's first utterance language and NEVER switch. Korean→Korean only. English→English only.\n"
-            "RULES:\n"
-            "- Call add_to_cart immediately when a menu item is mentioned. No confirmation.\n"
-            "- Call remove_from_cart immediately when removal is requested.\n"
-            "- Call recommend_menu only when customer asks what to order.\n"
-            "- Call checkout when customer is done ordering. Never if cart is empty.\n"
-            "- On checkout screen: call select_payment('app_card') or select_payment('physical_card') based on what customer says.\n"
-            "- If customer asks anything unrelated to food ordering, say only: '주문을 도와드릴게요.' (Korean) or 'I can only help with your order.' (English)\n"
-            "- MAX 1 short sentence per response. No filler. No repeated greetings.\n"
-            "- Speak fast and energetically.\n"
-            f"- This customer is '{name}', recognized by voice. Greet by name once, then take the order."
-        )
         await self._send({
             "type": "session.update",
-            "session": {"type": "realtime", "instructions": system_prompt},
+            "session": {"type": "realtime", "instructions": self._make_prompt(self._lang, name)},
+        })
+
+    async def set_language(self, lang: str):
+        """사용자 첫 발화 언어에 따라 AI 응답 언어 전환."""
+        self._lang = lang
+        await self._send({
+            "type": "session.update",
+            "session": {"type": "realtime", "instructions": self._make_prompt(lang)},
+        })
+        print(f"[RealtimeClient] 언어 전환: {lang}")
+
+    async def send_initial_greeting(self):
+        """세션 시작 즉시 AI가 인사말을 발화하도록 트리거."""
+        if self._lang == "en":
+            inst = (
+                "Greet the customer warmly and naturally in English. "
+                "One short sentence. Example: 'Hey there! Welcome, what can I get for you today?'"
+            )
+        else:
+            inst = (
+                "고객에게 진짜 직원처럼 자연스럽고 활기차게 한국어로 짧게 인사해. "
+                "한 문장만. 예: '어서오세요! 뭐 드릴까요?'"
+            )
+        await self._send({
+            "type": "response.create",
+            "response": {"instructions": inst}
         })
 
     async def greet_returning_user(self, name: str):
-        """화자 인식 완료 — 주문 흐름 방해 없이 지시사항만 조용히 업데이트."""
+        """화자 인식 완료 — 지시사항 업데이트 후 이름으로 인사."""
         await self.update_instructions(name)
+        if self._lang == "en":
+            inst = f"Welcome back, {name}! Greet them warmly by name in one short sentence."
+        else:
+            inst = f"'{name}'님 반갑다고 짧게 이름 불러서 인사해. 한 문장만."
+        await self._send({
+            "type": "response.create",
+            "response": {"instructions": inst}
+        })
 
     async def close(self):
         self._connected = False

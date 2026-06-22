@@ -67,7 +67,7 @@ def cosine_sim(a: list, b: list) -> float:
     return float(np.dot(a, b) / denom) if denom > 1e-8 else 0.0
 
 
-def find_user(embedding: list, users: list, threshold: float = 0.55) -> dict | None:
+def find_user(embedding: list, users: list, threshold: float = 0.42) -> dict | None:
     """등록된 사용자 중 코사인 유사도 임계값 이상인 사람 반환."""
     best, best_score = None, threshold
     for u in users:
@@ -75,6 +75,7 @@ def find_user(embedding: list, users: list, threshold: float = 0.55) -> dict | N
         if not stored:
             continue
         score = cosine_sim(embedding, stored)
+        print(f"[SpeakerVerify] {u.get('name')} 유사도: {score:.3f} (임계: {threshold})")
         if score > best_score:
             best_score = score
             best = u
