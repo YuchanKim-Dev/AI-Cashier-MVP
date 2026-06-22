@@ -1427,7 +1427,7 @@ function showScreen(name) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   const el = document.getElementById('screen-' + name);
   if (el) el.classList.add('active');
-  const cartScreens = ['ordering', 'checkout', 'card_insert', 'app_payment'];
+  const cartScreens = ['ordering'];
   document.getElementById('cart-panel').classList.toggle('hidden', !cartScreens.includes(name));
 }
 
