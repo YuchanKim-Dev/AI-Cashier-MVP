@@ -376,12 +376,14 @@ async def run_session(session_id: str):
         await _do_payment()
 
     async def action_handler():
+        nonlocal _is_listening, _ai_speaking, _ai_audio_bytes, _mic_reenable_scheduled
+        nonlocal _verification_done, _voice_buffer, _detected_language
+        nonlocal _verified_embedding, _utterance_count, _last_mid_check
         while True:
             action = await action_queue.get()
             atype = action.get("type")
 
             if atype == "reset":
-                nonlocal _is_listening, _ai_speaking, _ai_audio_bytes, _mic_reenable_scheduled
                 _is_listening = False
                 _ai_speaking = False
                 _ai_audio_bytes = 0
@@ -394,9 +396,6 @@ async def run_session(session_id: str):
                 push_session_state(session_id, session.to_dict())
 
             elif atype == "start":
-                nonlocal _verification_done, _voice_buffer, _detected_language
-                nonlocal _verified_embedding, _utterance_count, _last_mid_check
-                nonlocal _ai_speaking, _ai_audio_bytes, _mic_reenable_scheduled
                 # 매 대화마다 상태 초기화
                 _verification_done = False
                 _voice_buffer = bytearray()
