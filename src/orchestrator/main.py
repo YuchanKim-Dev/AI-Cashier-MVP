@@ -397,10 +397,11 @@ async def run_session(session_id: str):
             chunk = await audio_queue.get()
             if session.screen in _MUTE_SCREENS:
                 continue
-            if _ai_speaking:
-                continue  # AI 말하는 동안 마이크 뮤트 — echo loop 방지
+            # 화자인증 버퍼는 AI 말하는 중에도 채움 (사용자 마이크 데이터만 들어옴)
             if not _verification_done and len(_voice_buffer) < _MAX_BUFFER:
                 _voice_buffer.extend(chunk)
+            if _ai_speaking:
+                continue  # Realtime API 전송만 막음 — echo loop 방지
             await client.send_audio_chunk(chunk)
 
     try:

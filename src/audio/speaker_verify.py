@@ -67,7 +67,7 @@ def cosine_sim(a: list, b: list) -> float:
     return float(np.dot(a, b) / denom) if denom > 1e-8 else 0.0
 
 
-def find_user(embedding: list, users: list, threshold: float = 0.72) -> dict | None:
+def find_user(embedding: list, users: list, threshold: float = 0.55) -> dict | None:
     """등록된 사용자 중 코사인 유사도 임계값 이상인 사람 반환."""
     best, best_score = None, threshold
     for u in users:
