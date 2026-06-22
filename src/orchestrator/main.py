@@ -103,6 +103,10 @@ async def run_session(session_id: str):
         session.ai_text += delta
         push_session_state(session_id, session.to_dict())
 
+    def on_user_text_delta(delta: str):
+        session.user_text = (session.user_text or "") + delta
+        push_session_state(session_id, session.to_dict())
+
     def on_user_text(text: str):
         nonlocal _pending_ai, _pending_user
         session.user_text = text
@@ -175,6 +179,7 @@ async def run_session(session_id: str):
         if status == "listening":
             _is_listening = True
             session.ai_text = ""
+            session.user_text = ""  # 새 발화 시작 — 실시간 자막 초기화
             session.on_speech_start(ts)
             session.conversation = "listening"
             if session.screen == "waiting":
@@ -334,6 +339,7 @@ async def run_session(session_id: str):
         on_audio_delta=on_audio_delta,
         on_text_delta=on_text_delta,
         on_user_text=on_user_text,
+        on_user_text_delta=on_user_text_delta,
         on_response_done=on_response_done,
         on_function_call=on_function_call,
         on_session_ready=on_session_ready,

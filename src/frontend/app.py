@@ -142,10 +142,11 @@ async def tts_endpoint(text: str):
         from openai import OpenAI as OpenAISync
         client = OpenAISync(api_key=api_key)
         resp = client.audio.speech.create(
-            model="tts-1-hd",
+            model="tts-1",
             voice="nova",
             input=text[:600],
             response_format="mp3",
+            speed=1.5,
         )
         return resp.content
 
@@ -609,9 +610,15 @@ body {
   border-radius: 12px 2px 12px 12px;
 }
 
-/* 푸터 — 실시간 텍스트 표시 영역 숨김 (채팅 버블만 표시) */
+/* 푸터 — 실시간 사용자 발화 텍스트 표시 */
 #conv-footer {
-  display: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg2);
+  min-height: 44px;
 }
 #conv-footer-icon {
   width: 28px; height: 28px;
@@ -1408,7 +1415,12 @@ function updateConvFooter(state) {
     if (status) status.textContent = '응답 중';
   } else if (state.conversation === 'listening') {
     icon.textContent = '🎤';
-    stream.innerHTML = `<div style="display:flex;align-items:center;gap:10px"><div class="mic-wave"><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div></div><span style="color:var(--blue);font-size:.85rem;">듣는 중...</span></div>`;
+    const liveText = (state.user_text || '').trim();
+    if (liveText) {
+      stream.innerHTML = `<span style="color:var(--blue);font-size:.9rem">${escHtml(liveText)}<span style="display:inline-block;width:2px;height:.9em;background:var(--blue);vertical-align:middle;margin-left:2px;animation:blink .6s infinite"></span></span>`;
+    } else {
+      stream.innerHTML = `<div style="display:flex;align-items:center;gap:10px"><div class="mic-wave"><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div></div><span style="color:var(--blue);font-size:.85rem;">듣는 중...</span></div>`;
+    }
     if (badge) badge.textContent = '손님 발화 중';
     if (status) status.textContent = '듣는 중';
   } else if (state.conversation === 'processing') {

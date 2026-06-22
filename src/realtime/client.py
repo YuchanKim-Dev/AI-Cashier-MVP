@@ -41,6 +41,7 @@ class RealtimeClient:
         on_audio_delta: Optional[Callable[[str], None]] = None,
         on_text_delta: Optional[Callable[[str], None]] = None,
         on_user_text: Optional[Callable[[str], None]] = None,
+        on_user_text_delta: Optional[Callable[[str], None]] = None,
         on_response_done: Optional[Callable[[], None]] = None,
         on_function_call: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
         on_session_ready: Optional[Callable[[], None]] = None,
@@ -52,6 +53,7 @@ class RealtimeClient:
         self.on_audio_delta = on_audio_delta
         self.on_text_delta = on_text_delta
         self.on_user_text = on_user_text
+        self.on_user_text_delta = on_user_text_delta
         self.on_response_done = on_response_done
         self.on_function_call = on_function_call   # async (call_id, name, args_json)
         self.on_session_ready = on_session_ready
@@ -94,9 +96,9 @@ class RealtimeClient:
                         "format": _FMT_INPUT,
                         "turn_detection": {
                             "type": "server_vad",
-                            "threshold": 0.7,        # 0.5→0.7: 주변 소음 필터링 강화
-                            "prefix_padding_ms": 300,
-                            "silence_duration_ms": 800,  # 600→800: 짧은 침묵에 오발화 방지
+                            "threshold": 0.5,
+                            "prefix_padding_ms": 200,
+                            "silence_duration_ms": 500,
                         },
                         "transcription": {"model": "whisper-1"},
                     },
@@ -196,6 +198,12 @@ class RealtimeClient:
         elif t == "input_audio_buffer.speech_stopped":
             if self.on_status_update:
                 self.on_status_update("processing", time.time())
+
+        # ── 사용자 발화 전사 델타 (실시간)
+        elif t == "conversation.item.input_audio_transcription.delta":
+            delta = event.get("delta", "")
+            if delta and self.on_user_text_delta:
+                self.on_user_text_delta(delta)
 
         # ── 사용자 발화 전사 완료
         elif t == "conversation.item.input_audio_transcription.completed":
