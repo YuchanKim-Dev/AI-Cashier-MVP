@@ -89,6 +89,7 @@ async def run_session(session_id: str):
     _MAX_BUFFER   = 24000 * 2 * 6
     _is_listening = False
     _verification_done = False
+    _ai_speaking = False  # AI 오디오 재생 중 → 마이크 뮤트
     voice = os.getenv("OPENAI_REALTIME_VOICE", "alloy")
     model = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2")
     loop  = asyncio.get_event_loop()
@@ -107,8 +108,9 @@ async def run_session(session_id: str):
     )
 
     def on_audio_delta(b64: str):
-        pcm_bytes = base64.b64decode(b64)
-        push_audio_out(session_id, pcm_bytes)
+        nonlocal _ai_speaking
+        _ai_speaking = True
+        push_audio_out(session_id, base64.b64decode(b64))
 
     def on_text_delta(delta: str):
         session.ai_text += delta
@@ -212,6 +214,12 @@ async def run_session(session_id: str):
         elif status in ("idle", "speaking_done"):
             _is_listening = False
             session.conversation = "idle"
+            # 브라우저 오디오 버퍼 소진 후 마이크 재활성 (500ms 여유)
+            async def _reenable_mic():
+                nonlocal _ai_speaking
+                await asyncio.sleep(0.5)
+                _ai_speaking = False
+            loop.create_task(_reenable_mic())
         push_session_state(session_id, session.to_dict())
 
     async def on_function_call(call_id: str, name: str, arguments: str):
@@ -389,6 +397,8 @@ async def run_session(session_id: str):
             chunk = await audio_queue.get()
             if session.screen in _MUTE_SCREENS:
                 continue
+            if _ai_speaking:
+                continue  # AI 말하는 동안 마이크 뮤트 — echo loop 방지
             if not _verification_done and len(_voice_buffer) < _MAX_BUFFER:
                 _voice_buffer.extend(chunk)
             await client.send_audio_chunk(chunk)
