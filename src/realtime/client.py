@@ -98,7 +98,7 @@ class RealtimeClient:
             "session": {
                 "type": "realtime",
                 "instructions": system_prompt,
-                "output_modalities": ["text"],
+                "output_modalities": ["audio", "text"],
                 "audio": {
                     "input": {
                         "format": _FMT_INPUT,

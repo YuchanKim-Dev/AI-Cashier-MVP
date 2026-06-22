@@ -18,6 +18,7 @@
 """
 
 import asyncio
+import base64
 import os
 import ssl
 import time
@@ -36,6 +37,7 @@ from src.frontend.app import (
     get_session,
     remove_session,
     push_session_state,
+    push_audio_out,
 )
 from src.orchestrator.session import SessionState
 from src.realtime.client import RealtimeClient
@@ -105,7 +107,8 @@ async def run_session(session_id: str):
     )
 
     def on_audio_delta(b64: str):
-        pass
+        pcm_bytes = base64.b64decode(b64)
+        push_audio_out(session_id, pcm_bytes)
 
     def on_text_delta(delta: str):
         session.ai_text += delta

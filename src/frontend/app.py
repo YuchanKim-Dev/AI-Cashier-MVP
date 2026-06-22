@@ -54,12 +54,25 @@ def create_session(session_id: str) -> dict:
     sess = {
         "sse_queues": [],
         "audio_queue": asyncio.Queue(maxsize=300),
+        "audio_out_queues": [],   # AI 오디오 → 브라우저 스트리밍
         "action_queue": asyncio.Queue(),
         "state": _default_state(),
     }
     _sessions[session_id] = sess
     _new_session_queue.put_nowait(session_id)
     return sess
+
+
+def push_audio_out(session_id: str, pcm_bytes: bytes):
+    """Realtime API 오디오 청크를 해당 세션 브라우저로 전송."""
+    sess = _sessions.get(session_id)
+    if not sess:
+        return
+    for q in list(sess.get("audio_out_queues", [])):
+        try:
+            q.put_nowait(pcm_bytes)
+        except asyncio.QueueFull:
+            pass
 
 
 def get_session(session_id: str) -> dict | None:
@@ -246,6 +259,27 @@ async def audio_ws(websocket: WebSocket, sid: str = ""):
                 pass
     except (WebSocketDisconnect, Exception):
         pass
+
+
+@app.websocket("/ws/audio_out")
+async def audio_out_ws(websocket: WebSocket, sid: str = ""):
+    """AI 오디오 → 브라우저 실시간 스트리밍."""
+    await websocket.accept()
+    sess = get_session(sid)
+    if not sess:
+        await websocket.close()
+        return
+    q: asyncio.Queue = asyncio.Queue(maxsize=1000)
+    sess["audio_out_queues"].append(q)
+    try:
+        while True:
+            chunk = await q.get()
+            await websocket.send_bytes(chunk)
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        if q in sess.get("audio_out_queues", []):
+            sess["audio_out_queues"].remove(q)
 
 
 @app.post("/action/app_payment_confirm")
@@ -1234,20 +1268,24 @@ const MENU = {
   ],
 };
 
-let currentCategory = "버거";
-let currentState    = {};
-let ttsEnabled      = true;
-let _lastLogLen     = 0;
-let _lastAiCount    = 0;
-let _ttsAudio       = null;  // 현재 재생 중인 Audio 객체
-let _audioUnlocked  = false; // 브라우저 autoplay 잠금 해제 여부
+let currentCategory  = "버거";
+let currentState     = {};
+let ttsEnabled       = true;
+let _lastLogLen      = 0;
+let _audioUnlocked   = false;
+let _audioCtx        = null;   // Web Audio 컨텍스트 (AI 오디오 재생용)
+let _nextPlayTime    = 0;      // 다음 청크 재생 시작 시각
+let _audioOutWs      = null;   // AI 오디오 수신 WebSocket
+let _audioOutStarted = false;
+let _prevConversation = 'idle';
 
 const SESSION_ID = '__SESSION_ID__';
 
 // 첫 클릭/터치 시 오디오 컨텍스트 잠금 해제
 document.addEventListener('click', function() {
   _audioUnlocked = true;
-  startBrowserMic();  // 첫 클릭 시 마이크 시작 (_micStarted로 중복 방지)
+  startBrowserMic();
+  startAudioOutput();
 }, { capture: true });
 
 // ── 브라우저 마이크 → WebSocket 스트리밍 ──
@@ -1319,7 +1357,53 @@ registerProcessor('pcm-proc', PCMProcessor);`;
   }
 }
 
-// ── TTS (OpenAI API) ──
+// ── AI 오디오 스트리밍 (Realtime API PCM → Web Audio) ──
+function startAudioOutput() {
+  if (_audioOutStarted) return;
+  _audioOutStarted = true;
+  _audioCtx = new AudioContext({ sampleRate: 24000 });
+  _nextPlayTime = 0;
+
+  const wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:')
+    + '//' + location.host + '/ws/audio_out?sid=' + SESSION_ID;
+  _audioOutWs = new WebSocket(wsUrl);
+  _audioOutWs.binaryType = 'arraybuffer';
+
+  _audioOutWs.onopen  = () => console.log('[AudioOut] WS 연결됨');
+  _audioOutWs.onerror = (e) => console.warn('[AudioOut] WS 오류:', e);
+  _audioOutWs.onclose = () => { _audioOutStarted = false; };
+
+  _audioOutWs.onmessage = ({ data }) => {
+    if (!ttsEnabled || !_audioCtx) return;
+    if (_audioCtx.state === 'suspended') _audioCtx.resume();
+
+    // PCM16 LE @ 24kHz → Float32
+    const pcm16 = new Int16Array(data);
+    if (pcm16.length === 0) return;
+    const f32 = new Float32Array(pcm16.length);
+    for (let i = 0; i < pcm16.length; i++) f32[i] = pcm16[i] / 32768;
+
+    const buf = _audioCtx.createBuffer(1, f32.length, 24000);
+    buf.getChannelData(0).set(f32);
+    const src = _audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(_audioCtx.destination);
+
+    // 80ms 선행 버퍼 — 청크 사이 끊김 방지
+    const t = Math.max(_nextPlayTime, _audioCtx.currentTime + 0.08);
+    src.start(t);
+    _nextPlayTime = t + buf.duration;
+  };
+}
+
+function interruptAudio() {
+  // 사용자가 말하기 시작하면 AI 오디오 즉시 중단
+  if (!_audioCtx) return;
+  _audioCtx.close().catch(() => {});
+  _audioCtx = new AudioContext({ sampleRate: 24000 });
+  _nextPlayTime = 0;
+}
+
 function toggleTTS() {
   ttsEnabled = !ttsEnabled;
   const btn  = document.getElementById('tts-btn');
@@ -1329,33 +1413,13 @@ function toggleTTS() {
     btn.classList.add('tts-on');
     icon.textContent = '🔊';
     lbl.textContent  = '음성';
+    if (_audioCtx && _audioCtx.state === 'suspended') _audioCtx.resume();
   } else {
     btn.classList.remove('tts-on');
     icon.textContent = '🔇';
     lbl.textContent  = '음성';
-    if (_ttsAudio) { _ttsAudio.pause(); _ttsAudio = null; }
+    interruptAudio();
   }
-}
-
-// TTS prefetch: AI 텍스트가 완성되는 즉시 fetch → ArrayBuffer로 받아두고 바로 재생
-// new Audio(url)은 네트워크 왕복이 두 번 걸리는 문제 있음
-async function speakText(text) {
-  if (!ttsEnabled || !text || !_audioUnlocked) return;
-  try {
-    if (_ttsAudio) { _ttsAudio.pause(); _ttsAudio = null; }
-    const url = '/tts?text=' + encodeURIComponent(text);
-    const resp = await fetch(url);
-    if (!resp.ok) return;
-    const blob = await resp.blob();
-    const objUrl = URL.createObjectURL(blob);
-    const audio = new Audio(objUrl);
-    _ttsAudio = audio;
-    audio.play().catch(() => {});
-    audio.onended = () => {
-      if (_ttsAudio === audio) _ttsAudio = null;
-      URL.revokeObjectURL(objUrl);
-    };
-  } catch(e) { console.warn('TTS 오류:', e); }
 }
 
 // ── 화면 전환 ──
@@ -1369,6 +1433,11 @@ function showScreen(name) {
 
 // ── 상태 적용 ──
 function applyState(state) {
+  // 사용자가 말하기 시작하면 AI 오디오 중단
+  if (state.conversation === 'listening' && _prevConversation !== 'listening') {
+    interruptAudio();
+  }
+  _prevConversation = state.conversation;
   currentState = state;
   showScreen(state.screen);
   updateHeader(state);
@@ -1438,11 +1507,6 @@ function updateConvFooter(state) {
 
 // ── 대화 로그 ──
 function renderChatLog(log) {
-  const aiMsgs = log.filter(m => m.role === 'ai');
-  if (aiMsgs.length > _lastAiCount) {
-    speakText(aiMsgs[aiMsgs.length - 1].text);
-    _lastAiCount = aiMsgs.length;
-  }
   if (log.length === _lastLogLen) return;
   _lastLogLen = log.length;
 
