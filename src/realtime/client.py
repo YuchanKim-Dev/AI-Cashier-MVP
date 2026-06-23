@@ -364,12 +364,21 @@ class RealtimeClient:
 
     async def send_alert(self, instructions: str, max_wait: float = 2.0):
         """응답이 끝날 때까지 기다린 후 경고 메시지 전송.
-        충돌 없이 경고를 보내기 위한 헬퍼."""
+        _response_active 플래그와 서버 상태 사이의 race condition을 방지하기 위해
+        False가 된 후에도 추가 대기 후 cancel을 한 번 더 호출한다."""
         await self.cancel_response()
         waited = 0.0
-        while self._response_active and waited < max_wait:
+        while waited < max_wait:
             await asyncio.sleep(0.1)
             waited += 0.1
+            if self._response_active:
+                await self.cancel_response()  # 응답 중이면 재취소
+            else:
+                break  # False가 됐어도 아래서 추가 대기
+        # race condition 방지: False여도 0.4초 더 기다리고 cancel 재시도
+        await asyncio.sleep(0.4)
+        await self.cancel_response()
+        await asyncio.sleep(0.1)
         await self._send({
             "type": "response.create",
             "response": {"instructions": instructions}
