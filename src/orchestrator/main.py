@@ -88,14 +88,12 @@ async def run_session(session_id: str):
     _voice_buffer: bytearray = bytearray()
     _MAX_BUFFER   = 24000 * 2 * 6
     _is_listening = False
-    _verification_done = False
     _ai_speaking = False          # AI 오디오 재생 중 → 마이크 뮤트
     _ai_audio_bytes = 0           # 현재 응답에서 전송한 오디오 바이트 수
     _mic_reenable_scheduled = False  # 이중 스케줄 방지
     _detected_language: str | None = None  # "ko" | "en" — 첫 발화로 결정
-    _check_buffer = bytearray()   # 중간 화자 확인용 rolling buffer
+    _check_buffer = bytearray()   # 발화별 화자 확인용 버퍼
     _verified_embedding: list | None = None  # 인증된 사용자의 임베딩
-    _last_mid_check = 0.0         # 마지막 중간 화자 확인 시각
     _utterance_count = 0          # 이번 세션 발화 횟수
     voice = os.getenv("OPENAI_REALTIME_VOICE", "coral")
     model = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2")
@@ -161,7 +159,7 @@ async def run_session(session_id: str):
         return True
 
     def on_user_text(text: str):
-        nonlocal _detected_language, _utterance_count, _last_mid_check
+        nonlocal _detected_language, _utterance_count
         if _is_noise(text):
             return
         has_korean = any('가' <= c <= '힣' or 'ㄱ' <= c <= 'ㅎ' for c in text)
@@ -180,13 +178,9 @@ async def run_session(session_id: str):
         session.conversation_log.append({"role": "user", "text": text})
         print(f"[{sid}] 사용자 로그 추가: {text[:60]!r}")
         push_session_state(session_id, session.to_dict())
-        # 중간 화자 확인 (30초에 한 번, 3초 이상 오디오 있을 때)
-        now = time.time()
-        if (session.speaker_verified is True and _verified_embedding
-                and len(_check_buffer) >= 72000
-                and (now - _last_mid_check) > 30.0):
-            _last_mid_check = now
-            loop.create_task(_check_speaker_mid())
+        # 매 발화마다 화자 확인 (등록된 사람이 있을 때)
+        audio_snap = bytes(_check_buffer)
+        loop.create_task(_verify_speaker(audio_snap))
 
     def on_response_done():
         # 로그 처리는 on_ai_transcript_done에서 이미 완료
@@ -206,76 +200,57 @@ async def run_session(session_id: str):
         push_session_state(session_id, session.to_dict())
 
     def on_session_ready():
-        nonlocal _verification_done, _voice_buffer, _is_listening
+        nonlocal _voice_buffer, _is_listening
         print(f"[{sid}] Realtime 준비 완료.")
-        _verification_done = False
         _voice_buffer = bytearray()
         _is_listening  = False
         session.conversation_log = []
         _push({"mic": "active", "screen": "waiting"})
 
-    async def _run_speaker_verify():
-        nonlocal _verification_done, _verified_embedding
-        if _verification_done:
-            return
-        _verification_done = True
-        audio_data = bytes(_voice_buffer)
-        if len(audio_data) < 72_000:  # 최소 3초
-            print(f"[{sid}] 오디오 불충분({len(audio_data)/48000:.1f}s) — 화자인식 건너뜀")
+    async def _verify_speaker(audio: bytes):
+        """매 발화마다 호출. 처음엔 등록 유저 매칭, 이후엔 동일 화자 확인."""
+        nonlocal _verified_embedding
+        if len(audio) < 48_000:  # 최소 ~1초 @ 24kHz PCM16
             return
         try:
             all_users = get_all_users()
             users_with_embedding = [u for u in all_users if u.get("embedding")]
             if not users_with_embedding:
-                print(f"[{sid}] 등록된 목소리 없음 — 화자인식 건너뜀")
-                session.speaker_verified = None
-                push_session_state(session_id, session.to_dict())
-                return
-            emb = await extract_embedding(audio_data, sample_rate=24000)
-            if emb is None:
-                return
-            match = find_user(emb, users_with_embedding)
-            if match:
-                _verified_embedding = emb  # 중간 비교용 저장
-                session.user_name        = match["name"]
-                session.is_new_user      = False
-                session.speaker_verified = True
-                print(f"[{sid}] 인식됨: {match['name']}")
-                await client.greet_returning_user(match["name"])
-                push_session_state(session_id, session.to_dict())
-            else:
-                print(f"[{sid}] 유사도 낮음 — 불일치")
-                session.speaker_verified = False
-                push_session_state(session_id, session.to_dict())
-        except Exception as e:
-            print(f"[{sid}] 화자인식 오류: {e}")
-
-    async def _check_speaker_mid():
-        """중간 화자 변경 감지 — 등록된 사람과 크게 다른 목소리 감지 시 경고."""
-        nonlocal _check_buffer
-        audio = bytes(_check_buffer)
-        _check_buffer = bytearray()
-        if not audio or not _verified_embedding:
-            return
-        try:
+                return  # 등록된 목소리 없음 — 화자인식 불필요
             emb = await extract_embedding(audio, sample_rate=24000)
             if emb is None:
                 return
-            sim = cosine_sim(emb, _verified_embedding)
-            print(f"[{sid}] 중간 화자 확인: 유사도 {sim:.3f}")
-            if sim < 0.28:
-                print(f"[{sid}] 다른 목소리 감지!")
-                await client._send({
-                    "type": "response.create",
-                    "response": {
-                        "instructions": (
-                            "잠깐만요, 처음에 주문 시작하셨던 분이 직접 말씀해 주시겠어요? "
-                            "보안을 위해 확인이 필요합니다."
-                        )
-                    }
-                })
+            if _verified_embedding is not None:
+                # 인식된 사람이 계속 말하는지 확인 (다른 사람 끼어들었는지)
+                sim = cosine_sim(emb, _verified_embedding)
+                print(f"[{sid}] 화자 연속 확인: 유사도 {sim:.3f}")
+                if sim < 0.28:
+                    print(f"[{sid}] 다른 목소리 감지!")
+                    await client._send({
+                        "type": "response.create",
+                        "response": {
+                            "instructions": (
+                                "잠깐만요, 처음에 주문 시작하셨던 분이 직접 말씀해 주시겠어요? "
+                                "보안을 위해 확인이 필요합니다."
+                            )
+                        }
+                    })
+            else:
+                # 아직 인식 전 — 등록 유저 중 매칭 시도
+                match = find_user(emb, users_with_embedding)
+                if match:
+                    _verified_embedding = emb
+                    session.user_name        = match["name"]
+                    session.is_new_user      = False
+                    session.speaker_verified = True
+                    print(f"[{sid}] 인식됨: {match['name']}")
+                    await client.greet_returning_user(match["name"])
+                else:
+                    print(f"[{sid}] 유사도 낮음 — 불일치")
+                    session.speaker_verified = False
+                push_session_state(session_id, session.to_dict())
         except Exception as e:
-            print(f"[{sid}] 중간 화자 확인 오류: {e}")
+            print(f"[{sid}] 화자 확인 오류: {e}")
 
     def on_status_update(status: str, ts: float):
         nonlocal _is_listening, _check_buffer
@@ -292,8 +267,6 @@ async def run_session(session_id: str):
             _is_listening = False
             session.on_speech_end(ts)
             session.conversation = "processing"
-            if not _verification_done and len(_voice_buffer) >= 48_000:
-                loop.create_task(_run_speaker_verify())
         elif status == "speaking_done":
             # 오디오 전송 완료 → 실제 재생 시간만큼 마이크 뮤트 유지
             nonlocal _mic_reenable_scheduled
@@ -377,8 +350,8 @@ async def run_session(session_id: str):
 
     async def action_handler():
         nonlocal _is_listening, _ai_speaking, _ai_audio_bytes, _mic_reenable_scheduled
-        nonlocal _verification_done, _voice_buffer, _detected_language
-        nonlocal _verified_embedding, _utterance_count, _last_mid_check
+        nonlocal _voice_buffer, _detected_language
+        nonlocal _verified_embedding, _utterance_count
         while True:
             action = await action_queue.get()
             atype = action.get("type")
@@ -397,13 +370,11 @@ async def run_session(session_id: str):
 
             elif atype == "start":
                 # 매 대화마다 상태 초기화
-                _verification_done = False
                 _voice_buffer = bytearray()
                 _check_buffer.clear()
                 _detected_language = None
                 _verified_embedding = None
                 _utterance_count = 0
-                _last_mid_check = 0.0
                 _ai_speaking = False
                 _ai_audio_bytes = 0
                 _mic_reenable_scheduled = False
@@ -516,7 +487,7 @@ async def run_session(session_id: str):
             if not _ai_speaking:
                 # 침묵 제외 — VAD가 발화 감지할 때만 버퍼에 수집 (임베딩 품질 향상)
                 if _is_listening:
-                    if not _verification_done and len(_voice_buffer) < _MAX_BUFFER:
+                    if len(_voice_buffer) < _MAX_BUFFER:
                         _voice_buffer.extend(chunk)
                     if len(_check_buffer) < _MAX_BUFFER:
                         _check_buffer.extend(chunk)
