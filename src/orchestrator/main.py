@@ -231,13 +231,18 @@ async def run_session(session_id: str):
                 sim = cosine_sim(emb, _verified_embedding)
                 print(f"[{sid}] 화자 연속 확인: 유사도 {sim:.3f}")
                 if sim < 0.30:
-                    print(f"[{sid}] 다른 목소리 감지!")
+                    was_new = session.speaker_verified is not False
                     session.speaker_verified = False  # 결제 차단
                     push_session_state(session_id, session.to_dict())
-                    await client.send_alert(
-                        "지금 다른 분 목소리가 감지됐어요. "
-                        f"처음에 주문 시작하신 {session.user_name}님이 직접 말씀해 주시겠어요?"
-                    )
+                    if was_new:
+                        # 처음 감지될 때만 경고 — 이미 차단된 상태면 중복 send_alert 생략
+                        print(f"[{sid}] 다른 목소리 감지!")
+                        await client.send_alert(
+                            "지금 다른 분 목소리가 감지됐어요. "
+                            f"처음에 주문 시작하신 {session.user_name}님이 직접 말씀해 주시겠어요?"
+                        )
+                    else:
+                        print(f"[{sid}] 다른 목소리 (이미 차단됨 — 경고 생략)")
                 else:
                     # 원래 사람으로 확인됨 — 차단 해제
                     if session.speaker_verified is False:

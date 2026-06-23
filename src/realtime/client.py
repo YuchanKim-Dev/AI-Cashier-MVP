@@ -243,9 +243,10 @@ class RealtimeClient:
         elif t == "error":
             err = event.get("error", {})
             code = err.get("code", "")
+            # response_cancel_not_active: 이미 응답 완료된 후 cancel 시도 — 무해하므로 무시
+            if code in ("response_cancel_not_active", "unknown_parameter"):
+                return
             print(f"[RealtimeClient] 오류: {err}")
-            if code == "unknown_parameter":
-                print(f"[RealtimeClient] 미지원 파라미터 무시: {err.get('param')}")
 
         elif not t.startswith("rate_limit") and t not in (
             "session.created", "session.updated",
