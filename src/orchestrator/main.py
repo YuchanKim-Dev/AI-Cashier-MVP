@@ -327,6 +327,12 @@ async def run_session(session_id: str):
                                 )
                             }))
                             return
+                        else:
+                            # 통과 — 즉시 speaker_verified 복구 (action_handler 차단 방지)
+                            if session.speaker_verified is not True:
+                                session.speaker_verified = True
+                                push_session_state(session_id, session.to_dict())
+                                print(f"[{sid}] select_payment 통과 — speaker_verified 복구")
                 except Exception as e:
                     print(f"[{sid}] select_payment 화자 확인 오류: {e}")
         result_json = await fn_handler.handle(call_id, name, arguments)
