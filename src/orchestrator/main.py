@@ -210,7 +210,9 @@ async def run_session(session_id: str):
     async def _verify_speaker(audio: bytes):
         """매 발화마다 호출. 처음엔 등록 유저 매칭, 이후엔 동일 화자 확인."""
         nonlocal _verified_embedding
-        if len(audio) < 48_000:  # 최소 ~1초 @ 24kHz PCM16
+        # 연속 확인은 오탐 방지를 위해 2초 이상 오디오만 사용
+        min_bytes = 96_000 if _verified_embedding is not None else 48_000
+        if len(audio) < min_bytes:
             return
         try:
             all_users = get_all_users()
@@ -224,17 +226,27 @@ async def run_session(session_id: str):
                 # 인식된 사람이 계속 말하는지 확인 (다른 사람 끼어들었는지)
                 sim = cosine_sim(emb, _verified_embedding)
                 print(f"[{sid}] 화자 연속 확인: 유사도 {sim:.3f}")
-                if sim < 0.28:
+                if sim < 0.22:
                     print(f"[{sid}] 다른 목소리 감지!")
+                    session.speaker_verified = False  # 결제 차단
+                    push_session_state(session_id, session.to_dict())
+                    # 진행 중인 AI 응답을 끊고 바로 경고
+                    await client.cancel_response()
+                    await asyncio.sleep(0.15)
                     await client._send({
                         "type": "response.create",
                         "response": {
                             "instructions": (
-                                "잠깐만요, 처음에 주문 시작하셨던 분이 직접 말씀해 주시겠어요? "
-                                "보안을 위해 확인이 필요합니다."
+                                "지금 다른 분 목소리가 감지됐어요. "
+                                f"처음에 주문 시작하신 {session.user_name}님이 직접 말씀해 주시겠어요?"
                             )
                         }
                     })
+                else:
+                    # 원래 사람으로 확인됨 — 차단 해제
+                    if session.speaker_verified is False:
+                        session.speaker_verified = True
+                        push_session_state(session_id, session.to_dict())
             else:
                 # 아직 인식 전 — 등록 유저 중 매칭 시도
                 match = find_user(emb, users_with_embedding)
@@ -389,7 +401,22 @@ async def run_session(session_id: str):
                 _push({"screen": "checkout"})
 
             elif atype == "payment":
-                await process_payment(action.get("method", "physical_card"))
+                # 등록 사용자가 있는데 다른 목소리가 감지된 상태면 결제 거부
+                if _verified_embedding is not None and session.speaker_verified is False:
+                    print(f"[{sid}] 결제 차단 — 화자 불일치")
+                    await client.cancel_response()
+                    await asyncio.sleep(0.15)
+                    await client._send({
+                        "type": "response.create",
+                        "response": {
+                            "instructions": (
+                                f"결제는 주문하신 {session.user_name}님만 진행할 수 있어요. "
+                                f"{session.user_name}님이 직접 말씀해 주시면 바로 도와드릴게요."
+                            )
+                        }
+                    })
+                else:
+                    await process_payment(action.get("method", "physical_card"))
 
             elif atype == "app_payment_confirm":
                 await _do_payment()
