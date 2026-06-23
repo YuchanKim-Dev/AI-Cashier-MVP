@@ -210,8 +210,11 @@ async def run_session(session_id: str):
     async def _verify_speaker(audio: bytes):
         """매 발화마다 호출. 처음엔 등록 유저 매칭, 이후엔 동일 화자 확인."""
         nonlocal _verified_embedding
-        # 연속 확인은 오탐 방지를 위해 2초 이상 오디오만 사용
-        min_bytes = 96_000 if _verified_embedding is not None else 48_000
+        # 차단된 상태(False)에서 복구 시도는 낮은 조건(1초), 정상 확인은 높은 조건(2초)
+        if _verified_embedding is not None:
+            min_bytes = 48_000 if session.speaker_verified is False else 96_000
+        else:
+            min_bytes = 48_000
         if len(audio) < min_bytes:
             return
         try:
@@ -226,7 +229,7 @@ async def run_session(session_id: str):
                 # 인식된 사람이 계속 말하는지 확인 (다른 사람 끼어들었는지)
                 sim = cosine_sim(emb, _verified_embedding)
                 print(f"[{sid}] 화자 연속 확인: 유사도 {sim:.3f}")
-                if sim < 0.22:
+                if sim < 0.15:
                     print(f"[{sid}] 다른 목소리 감지!")
                     session.speaker_verified = False  # 결제 차단
                     push_session_state(session_id, session.to_dict())
@@ -245,6 +248,7 @@ async def run_session(session_id: str):
                 else:
                     # 원래 사람으로 확인됨 — 차단 해제
                     if session.speaker_verified is False:
+                        print(f"[{sid}] 화자 복구됨: {session.user_name}")
                         session.speaker_verified = True
                         push_session_state(session_id, session.to_dict())
             else:

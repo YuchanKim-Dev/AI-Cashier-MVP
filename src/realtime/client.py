@@ -340,8 +340,12 @@ class RealtimeClient:
         })
 
     async def greet_returning_user(self, name: str):
-        """화자 인식 완료 — 지시사항 업데이트 후 이름으로 인사."""
+        """화자 인식 완료 — 지시사항 업데이트 후 이름으로 인사.
+        AI가 이미 응답 중이면 인사는 생략하고 지시만 업데이트한다."""
         await self.update_instructions(name)
+        if self._response_active:
+            # 이미 응답 중 — 인사를 끊으면 어색하므로 다음 응답부터 이름 포함
+            return
         if self._lang == "en":
             inst = f"Welcome back, {name}! Greet them warmly by name in one short sentence."
         else:
