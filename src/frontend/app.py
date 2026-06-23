@@ -1647,6 +1647,10 @@ function updateCheckoutIdentity(state) {
     greetEl.style.display = 'flex';
     document.getElementById('checkout-greeting-text').textContent = `안녕하세요, ${state.user_name}님!`;
     identEl.style.display = 'none';
+  } else if (state.is_new_user === false) {
+    // 등록된 사용자인데 음성인식이 안 된 경우 — 폼 숨김
+    greetEl.style.display = 'none';
+    identEl.style.display = 'none';
   } else {
     greetEl.style.display = 'none';
     identEl.style.display = 'block';

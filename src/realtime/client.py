@@ -258,7 +258,7 @@ class RealtimeClient:
         ):
             print(f"[RealtimeClient] 미처리 이벤트: {t}")
 
-    def _make_prompt(self, lang: str = "ko", user_name: str = None) -> str:
+    def _make_prompt(self, lang: str = "ko", user_name: str = None, is_new_user: bool = True) -> str:
         """언어 및 사용자 이름에 맞는 시스템 프롬프트 생성."""
         if lang == "en":
             prompt = (
@@ -273,9 +273,10 @@ class RealtimeClient:
                 "- At payment screen: call select_payment when customer mentions 'app card' or 'card'\n"
                 "- Keep answers SHORT and NATURAL. Max 1–2 sentences.\n"
                 "- Example tone: 'Of course! One cheeseburger, coming right up! Anything else for you today?'\n"
-                "- If customer seems unregistered, casually mention they can register name+phone at checkout for personalized service.\n"
                 "- Do NOT repeat greetings."
             )
+            if is_new_user and not user_name:
+                prompt += "\n- Casually mention once at checkout that they can register name+phone for personalized service next time."
         else:
             prompt = (
                 "너는 햄버거 가게 카운터 직원 '케이'야. 진짜 서비스직 직원처럼 밝고 친절하게 말해.\n"
@@ -292,10 +293,12 @@ class RealtimeClient:
                 "- 주문 끝나면 checkout 호출. 장바구니 비면 절대 금지.\n"
                 "- 결제 화면: 앱카드/현장카드 말하면 select_payment 호출.\n"
                 "- 답은 1~2문장. 간결하고 명랑하게.\n"
-                "- 인사말 반복 금지.\n"
-                "- 처음 주문하는 고객(미등록)에게는 결제 전에 한 번만: "
-                "'이름이랑 전화번호 등록하시면 다음 방문 때 목소리로 바로 주문하실 수 있어요! 앱에서 등록 가능하세요~' 라고 알려줘."
+                "- 인사말 반복 금지."
             )
+            if is_new_user and not user_name:
+                prompt += (
+                    "\n- 결제 전에 한 번만: '이름이랑 전화번호 등록하시면 다음 방문 때 목소리로 바로 주문하실 수 있어요! 앱에서 등록 가능하세요~' 라고 알려줘."
+                )
         if user_name:
             if lang == "en":
                 prompt += f"\n- This customer is {user_name}. Greet them warmly by name once."
@@ -304,10 +307,10 @@ class RealtimeClient:
         return prompt
 
     async def update_instructions(self, name: str):
-        """화자 인식 후 AI에게 사용자 이름 알림."""
+        """화자 인식 후 AI에게 사용자 이름 알림 (등록된 사용자 — 등록 안내 생략)."""
         await self._send({
             "type": "session.update",
-            "session": {"type": "realtime", "instructions": self._make_prompt(self._lang, name)},
+            "session": {"type": "realtime", "instructions": self._make_prompt(self._lang, name, is_new_user=False)},
         })
 
     async def set_language(self, lang: str):
