@@ -405,6 +405,20 @@ async def run_session(session_id: str):
                 _push({"screen": "checkout"})
 
             elif atype == "payment":
+                # 결제 직전 화자 강제 재확인 (짧은 발화라도 최소 0.5초 이상이면 체크)
+                if _verified_embedding is not None:
+                    snap = bytes(_check_buffer)
+                    if len(snap) >= 24_000:
+                        try:
+                            emb = await extract_embedding(snap, sample_rate=24000)
+                            if emb is not None:
+                                sim = cosine_sim(emb, _verified_embedding)
+                                print(f"[{sid}] 결제 화자 재확인: 유사도 {sim:.3f}")
+                                if sim < 0.15:
+                                    session.speaker_verified = False
+                                    push_session_state(session_id, session.to_dict())
+                        except Exception as e:
+                            print(f"[{sid}] 결제 화자 확인 오류: {e}")
                 # 등록 사용자가 있는데 다른 목소리가 감지된 상태면 결제 거부
                 if _verified_embedding is not None and session.speaker_verified is False:
                     print(f"[{sid}] 결제 차단 — 화자 불일치")
