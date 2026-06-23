@@ -210,12 +210,11 @@ async def run_session(session_id: str):
     async def _verify_speaker(audio: bytes):
         """매 발화마다 호출. 처음엔 등록 유저 매칭, 이후엔 동일 화자 확인."""
         nonlocal _verified_embedding
-        # 누적 rolling buffer 사용 — 짧은 발화 여러개가 쌓이면 확인
-        # 복구 시도는 1초, 정상 확인은 1.5초 (이전 2초에서 낮춤)
+        # 발화별 buffer — 0.625초(30,000 bytes) 이상이면 확인 시도
         if _verified_embedding is not None:
-            min_bytes = 48_000 if session.speaker_verified is False else 72_000
+            min_bytes = 30_000 if session.speaker_verified is False else 30_000
         else:
-            min_bytes = 48_000
+            min_bytes = 30_000
         if len(audio) < min_bytes:
             return
         try:
@@ -230,7 +229,7 @@ async def run_session(session_id: str):
                 # 인식된 사람이 계속 말하는지 확인 (다른 사람 끼어들었는지)
                 sim = cosine_sim(emb, _verified_embedding)
                 print(f"[{sid}] 화자 연속 확인: 유사도 {sim:.3f}")
-                if sim < 0.22:
+                if sim < 0.30:
                     print(f"[{sid}] 다른 목소리 감지!")
                     session.speaker_verified = False  # 결제 차단
                     push_session_state(session_id, session.to_dict())
@@ -265,7 +264,7 @@ async def run_session(session_id: str):
         nonlocal _is_listening, _check_buffer
         if status == "listening":
             _is_listening = True
-            # _check_buffer는 초기화 안 함 — 누적 rolling window (짧은 발화도 합산 확인)
+            _check_buffer = bytearray()  # 이번 발화 시작 시 초기화
             session.ai_text = ""
             session.user_text = ""  # 새 발화 시작 — 실시간 자막 초기화
             session.on_speech_start(ts)
@@ -407,7 +406,7 @@ async def run_session(session_id: str):
                             if emb is not None:
                                 sim = cosine_sim(emb, _verified_embedding)
                                 print(f"[{sid}] 결제 화자 재확인: 유사도 {sim:.3f}")
-                                if sim < 0.22:
+                                if sim < 0.30:
                                     session.speaker_verified = False
                                     push_session_state(session_id, session.to_dict())
                         except Exception as e:
@@ -520,10 +519,8 @@ async def run_session(session_id: str):
                 if _is_listening:
                     if len(_voice_buffer) < _MAX_BUFFER:
                         _voice_buffer.extend(chunk)
-                    _check_buffer.extend(chunk)
-                    # 최근 6초 rolling window — 짧은 발화 누적해서 확인
-                    if len(_check_buffer) > _MAX_BUFFER:
-                        del _check_buffer[:len(_check_buffer) - _MAX_BUFFER]
+                    if len(_check_buffer) < _MAX_BUFFER:
+                        _check_buffer.extend(chunk)
             if _ai_speaking:
                 continue  # Realtime API 전송만 막음 — echo loop 방지
             await client.send_audio_chunk(chunk)
