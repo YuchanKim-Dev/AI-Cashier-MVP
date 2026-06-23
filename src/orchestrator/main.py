@@ -19,6 +19,7 @@
 
 import asyncio
 import base64
+import json
 import os
 import re as _re
 import ssl
@@ -299,6 +300,30 @@ async def run_session(session_id: str):
         push_session_state(session_id, session.to_dict())
 
     async def on_function_call(call_id: str, name: str, arguments: str):
+        # select_payment 전에 화자 확인 — 다르면 AI가 직접 차단 멘트 생성
+        # (action_handler보다 먼저 차단해야 "앱카드로 진행됩니다" 멘트가 안 나옴)
+        if name == "select_payment" and _verified_embedding is not None:
+            snap = bytes(_check_buffer)
+            if len(snap) >= 30_000:
+                try:
+                    emb = await extract_embedding(snap, sample_rate=24000)
+                    if emb is not None:
+                        sim = cosine_sim(emb, _verified_embedding)
+                        print(f"[{sid}] select_payment 화자 확인: 유사도 {sim:.3f}")
+                        if sim < 0.30:
+                            session.speaker_verified = False
+                            push_session_state(session_id, session.to_dict())
+                            print(f"[{sid}] select_payment 차단 — 화자 불일치")
+                            await client.send_function_result(call_id, json.dumps({
+                                "error": "speaker_mismatch",
+                                "message": (
+                                    f"화자 불일치 감지. {session.user_name}님이 직접 "
+                                    "말씀해 주셔야 결제가 가능합니다."
+                                )
+                            }))
+                            return
+                except Exception as e:
+                    print(f"[{sid}] select_payment 화자 확인 오류: {e}")
         result_json = await fn_handler.handle(call_id, name, arguments)
         await client.send_function_result(call_id, result_json)
         push_session_state(session_id, session.to_dict())
