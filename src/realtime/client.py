@@ -12,6 +12,7 @@ GA API 주요 변경사항 (Beta 2026-05 폐기):
       response.audio.done        → response.output_audio.done
 """
 
+import asyncio
 import base64
 import json
 import ssl
@@ -360,6 +361,19 @@ class RealtimeClient:
         if self._response_active:
             await self._send({"type": "response.cancel"})
         await self._send({"type": "input_audio_buffer.clear"})
+
+    async def send_alert(self, instructions: str, max_wait: float = 2.0):
+        """응답이 끝날 때까지 기다린 후 경고 메시지 전송.
+        충돌 없이 경고를 보내기 위한 헬퍼."""
+        await self.cancel_response()
+        waited = 0.0
+        while self._response_active and waited < max_wait:
+            await asyncio.sleep(0.1)
+            waited += 0.1
+        await self._send({
+            "type": "response.create",
+            "response": {"instructions": instructions}
+        })
 
     async def close(self):
         self._connected = False

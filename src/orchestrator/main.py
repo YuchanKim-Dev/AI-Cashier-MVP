@@ -233,18 +233,10 @@ async def run_session(session_id: str):
                     print(f"[{sid}] 다른 목소리 감지!")
                     session.speaker_verified = False  # 결제 차단
                     push_session_state(session_id, session.to_dict())
-                    # 진행 중인 AI 응답을 끊고 바로 경고
-                    await client.cancel_response()
-                    await asyncio.sleep(0.15)
-                    await client._send({
-                        "type": "response.create",
-                        "response": {
-                            "instructions": (
-                                "지금 다른 분 목소리가 감지됐어요. "
-                                f"처음에 주문 시작하신 {session.user_name}님이 직접 말씀해 주시겠어요?"
-                            )
-                        }
-                    })
+                    await client.send_alert(
+                        "지금 다른 분 목소리가 감지됐어요. "
+                        f"처음에 주문 시작하신 {session.user_name}님이 직접 말씀해 주시겠어요?"
+                    )
                 else:
                     # 원래 사람으로 확인됨 — 차단 해제
                     if session.speaker_verified is False:
@@ -422,17 +414,10 @@ async def run_session(session_id: str):
                 # 등록 사용자가 있는데 다른 목소리가 감지된 상태면 결제 거부
                 if _verified_embedding is not None and session.speaker_verified is False:
                     print(f"[{sid}] 결제 차단 — 화자 불일치")
-                    await client.cancel_response()
-                    await asyncio.sleep(0.15)
-                    await client._send({
-                        "type": "response.create",
-                        "response": {
-                            "instructions": (
-                                f"결제는 주문하신 {session.user_name}님만 진행할 수 있어요. "
-                                f"{session.user_name}님이 직접 말씀해 주시면 바로 도와드릴게요."
-                            )
-                        }
-                    })
+                    await client.send_alert(
+                        f"결제는 주문하신 {session.user_name}님만 진행할 수 있어요. "
+                        f"{session.user_name}님이 직접 말씀해 주시면 바로 도와드릴게요."
+                    )
                 else:
                     await process_payment(action.get("method", "physical_card"))
 
