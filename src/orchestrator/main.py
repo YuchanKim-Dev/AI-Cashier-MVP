@@ -230,7 +230,7 @@ async def run_session(session_id: str):
                 # 인식된 사람이 계속 말하는지 확인 (다른 사람 끼어들었는지)
                 sim = cosine_sim(emb, _verified_embedding)
                 print(f"[{sid}] 화자 연속 확인: 유사도 {sim:.3f}")
-                if sim < 0.30:
+                if sim < 0.22:
                     was_new = session.speaker_verified is not False
                     session.speaker_verified = False  # 결제 차단
                     push_session_state(session_id, session.to_dict())
@@ -315,7 +315,7 @@ async def run_session(session_id: str):
                     if emb is not None:
                         sim = cosine_sim(emb, _verified_embedding)
                         print(f"[{sid}] select_payment 화자 확인: 유사도 {sim:.3f}")
-                        if sim < 0.30:
+                        if sim < 0.22:
                             session.speaker_verified = False
                             push_session_state(session_id, session.to_dict())
                             print(f"[{sid}] select_payment 차단 — 화자 불일치")
@@ -388,7 +388,10 @@ async def run_session(session_id: str):
             _push({"screen": "card_insert"})
             await asyncio.sleep(3)
         elif method == "app_card":
-            _push({"screen": "app_payment"})
+            name = session.user_name or "고객"
+            await client.send_alert(
+                f"앗, {name}님이 현재 오투오버거에 위치하지 않아 결제가 불가능해요."
+            )
             return
         await _do_payment()
 
@@ -442,7 +445,7 @@ async def run_session(session_id: str):
                             if emb is not None:
                                 sim = cosine_sim(emb, _verified_embedding)
                                 print(f"[{sid}] 결제 화자 재확인: 유사도 {sim:.3f}")
-                                if sim < 0.30:
+                                if sim < 0.22:
                                     session.speaker_verified = False
                                     push_session_state(session_id, session.to_dict())
                         except Exception as e:
